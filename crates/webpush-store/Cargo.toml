@@ -1,0 +1,34 @@
+[package]
+name = "webpush-store"
+description = "Storage contract and adapters for a Web Push service"
+keywords = ["webpush", "push", "storage", "bigtable"]
+categories = ["database", "network-programming"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+getrandom = "0.3"
+googleapis-tonic-google-bigtable-admin-v2 = { version = "0.45", optional = true }
+googleapis-tonic-google-bigtable-v2 = { version = "0.39", optional = true }
+prost-types = { version = "0.14", optional = true }
+tonic = { version = "0.14", features = ["transport"], optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[features]
+default = []
+# Cloud Bigtable adapter (`BigtableStore`).
+bigtable = [
+    "dep:tonic",
+    "dep:prost-types",
+    "dep:googleapis-tonic-google-bigtable-v2",
+    "dep:googleapis-tonic-google-bigtable-admin-v2",
+]
+
+[lints]
+workspace = true

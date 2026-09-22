@@ -39,7 +39,7 @@ For every message, generate a fresh ephemeral key pair and a fresh salt, then en
 
 ```rust
 use p256::{SecretKey, elliptic_curve::rand_core::{OsRng, RngCore}};
-use webpush_service::ece::webpush;
+use webpush_crypto::ece::webpush;
 
 let ephemeral: [u8; 32] = SecretKey::random(&mut OsRng).to_bytes().into();
 let mut salt = [0u8; 16];

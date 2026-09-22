@@ -1,0 +1,101 @@
+# Every setting of webpush-server with its default. Only `origin` is
+# required; delete what you do not change.
+#
+# Any setting can also come from the environment: WEBPUSH_ plus the path in
+# upper case with `__` between levels, for example WEBPUSH_CLUSTER__TOKEN or
+# WEBPUSH_PUBLIC__MAX_CONNECTIONS. The environment wins over this file.
+# Durations use humantime syntax: "250ms", "30s", "5m", "60days".
+
+# all | endpoint | connect. `endpoint` and `connect` need [cluster].
+role = "all"
+
+# Public origin: base of every push endpoint and the VAPID `aud`.
+origin = "https://push.example.net"
+
+[public]
+listen = "0.0.0.0:8443"
+# Open connections, WebSocket sessions included.
+max_connections = 100000
+handshake_timeout = "10s"
+
+# Without [public.tls] the listener speaks plaintext HTTP/1.1 and HTTP/2 and
+# a proxy in front must terminate TLS.
+[public.tls]
+cert_file = "/etc/webpush/cert.pem"
+key_file = "/etc/webpush/key.pem"
+
+# Health, readiness, version, metrics, and delivery between nodes.
+# Plaintext; keep it private to the deployment.
+[internal]
+listen = "0.0.0.0:8081"
+
+# Required for role = "endpoint" or "connect".
+# [cluster]
+# node_url = "http://10.0.3.7:8081"   # this node's internal URL, unique per node
+# token = ""                          # 16+ characters; prefer WEBPUSH_CLUSTER__TOKEN
+# notify_timeout = "2s"
+
+[push]
+max_ttl = "60days"
+# Octets; at least 4096 (RFC 8030 §7.2).
+max_payload = 4096
+reaper_interval = "1s"
+
+[websocket]
+hello_timeout = "10s"
+ping_interval = "60s"
+pong_timeout = "30s"
+backlog_batch = 100
+# Live events buffered per connection before it is closed with 1013.
+queue = 128
+
+[receipts]
+keepalive = "30s"
+
+[user_agents]
+# Unset keeps user agents forever.
+# expire_after = "60days"
+sweep_interval = "1h"
+
+[cors]
+# ["*"] allows any origin; empty disables CORS.
+allowed_origins = []
+
+[registration]
+# Required when a bridge is configured; 32+ characters each. The first key
+# signs new secrets; all keys verify. Prefer WEBPUSH_REGISTRATION__SECRET_KEYS.
+secret_keys = []
+
+# [bridges.fcm]
+# timeout = "10s"
+# [bridges.fcm.apps.example-android]
+# credentials_file = "/etc/webpush/fcm-example.json"
+
+# [bridges.apns]
+# timeout = "10s"
+# [bridges.apns.apps.example-ios]
+# key_file = "/etc/webpush/apns-example.p8"
+# key_id = "ABC123DEFG"
+# team_id = "DEF123GHIJ"
+# topic = "com.example.app"
+# environment = "production"   # or "sandbox"
+# push_type = "background"     # or "alert", which requires `aps`
+# aps = { "mutable-content" = 1, alert = { title = "New message" } }
+
+# The default is the memory store. For Bigtable (build with --features bigtable):
+# [store.bigtable]
+# endpoint = "http://127.0.0.1:8086"
+# project = "dev"
+# instance = "dev"
+# table = "push"
+# create_table = false
+
+[log]
+# tracing filter; RUST_LOG wins when set.
+level = "info"
+# text | json
+format = "text"
+
+[shutdown]
+drain_delay = "5s"
+timeout = "30s"

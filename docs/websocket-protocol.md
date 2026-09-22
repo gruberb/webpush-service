@@ -1,6 +1,6 @@
 # WebSocket protocol reference
 
-User agents talk to this service over one WebSocket, using the protocol Firefox speaks to Mozilla's push service. This page lists every message. The field names, values, and behaviors match what Firefox sends and checks (`dom/push/PushServiceWebSocket.sys.mjs`), so a stock Firefox works against this service with `dom.push.serverURL` set to it.
+Browsers talk to this service over one WebSocket, using the protocol Firefox speaks to its push service. This page lists every message. The field names, values, and behaviors match what Firefox sends and checks (`dom/push/PushServiceWebSocket.sys.mjs`), so a stock Firefox works against this service with `dom.push.serverURL` set to it.
 
 For a walkthrough, see [Connecting a client](connecting-a-client.md).
 
@@ -12,10 +12,24 @@ For a walkthrough, see [Connecting a client](connecting-a-client.md).
 | Subprotocol | `push-notification`. The server selects it when offered |
 | Frames | Text frames, each one JSON object. Binary frames close the connection |
 | Largest client message | 64 KiB |
-| First message | Must be `hello`, within 10 seconds |
-| Sessions | One per `uaid`. A new `hello` for a `uaid` closes the older connection |
+| First message | Must be `hello`, within `websocket.hello_timeout` (default 10 seconds) |
+| Sessions | One per `uaid`, across all connection nodes. A new `hello` for a `uaid` closes the older connection |
+| Server pings | A WebSocket ping every `websocket.ping_interval` (default 60 seconds) |
+| Idle limit | A session that sends nothing, not even a pong, for `ping_interval` plus `websocket.pong_timeout` (default 30 seconds) is closed |
 
 Every message is an object with a `messageType` field, except the short ping form `{}`. Unknown fields are ignored. Text that is not JSON, or an unknown `messageType`, closes the connection.
+
+### Close codes
+
+| Code | Sent when |
+|---|---|
+| `1000` | A newer session for the same `uaid` replaced this one (reason `replaced`) |
+| `1001` | The service is shutting down, or the session was idle past the limit |
+| `1002` | Protocol error: first message not `hello`, a second `hello`, or an invalid message |
+| `1003` | The client sent a binary frame |
+| `1013` | The session fell more than `websocket.queue` events behind. Reconnect; the missed messages are in storage |
+
+Clients should reconnect with backoff after any close. Undelivered messages stay stored and arrive on the next session.
 
 ## Messages from the client
 
@@ -31,7 +45,7 @@ Starts the session. Sent once, as the first message.
 |---|---|---|
 | `uaid` | No | The id from a previous session. Omit it to get a new one |
 | `use_webpush` | No | Firefox sends `true`. Accepted and ignored |
-| `broadcasts` | No | Mozilla broadcast subscriptions. Accepted and ignored |
+| `broadcasts` | No | Broadcast subscriptions. This service offers no broadcasts; accepted and ignored |
 
 ### `register`
 
@@ -83,7 +97,7 @@ Firefox reports that a message reached the device but its service worker failed.
 
 ### `broadcast_subscribe`
 
-Mozilla broadcast subscriptions, used by Firefox for remote settings. Not part of Web Push. Accepted and ignored.
+Broadcast subscriptions. Broadcasts are not part of Web Push and this service offers none, so the message is accepted and ignored, and the `broadcasts` field of the server's `hello` is always `{}`.
 
 ### Ping
 
@@ -99,7 +113,9 @@ Mozilla broadcast subscriptions, used by Firefox for remote settings. Not part o
 
 `uaid` is 32 lowercase hexadecimal characters. It equals the client's `uaid` when the service knows it, and is new otherwise. A client that receives a different `uaid` must drop its stored subscriptions, as Firefox does.
 
-After `hello`, the server sends every stored, unexpired message for the `uaid`, oldest first.
+A new `uaid` is not stored until the client's first `register`. A client that reconnects with a `uaid` it never registered anything under therefore gets a different one. The `uaid` of a bridged user agent is never accepted here and also gets a new one.
+
+After `hello`, the server sends the stored, unexpired messages for the `uaid`, oldest first, in batches of `websocket.backlog_batch` (default 100). The next batch follows once every message sent so far has been acknowledged. A client that never acknowledges a message receives the rest of the backlog on its next session.
 
 ### `register`
 
@@ -142,14 +158,14 @@ Nothing else is sent: no TTL, urgency, topic, or VAPID data. A message is sent a
 
 `{}`.
 
-## Differences from Mozilla autopush
+## Choices this service makes
 
-The protocol is the same; these behaviors differ:
+The protocol leaves some behavior to the server. This service:
 
-| Behavior | autopush | This service |
-|---|---|---|
-| Push endpoint | Encrypts the `uaid` and channel id | Random id, unrelated to both |
-| Delivery receipts | Not supported | Supported (RFC 8030 §5.1) |
-| Broadcasts | Supported | Ignored |
-| Bodies without `Content-Encoding` | Rejected with 400 | Accepted, as RFC 8030 allows |
-| User agent expiry | After 60 days of inactivity | None |
+| Behavior | Choice |
+|---|---|
+| Push endpoint | A random id, unrelated to the `uaid` and `channelID` |
+| Delivery receipts | Supported (RFC 8030 §5.1) |
+| Broadcasts | Not offered |
+| Bodies without `Content-Encoding` | Accepted, as RFC 8030 allows |
+| User agent expiry | Optional: `user_agents.expire_after` deletes user agents not seen for that long. A connected session counts as seen |

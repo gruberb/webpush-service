@@ -12,7 +12,7 @@ This page explains the actors and resources involved and how they relate.
 | [RFC 8291](https://www.rfc-editor.org/rfc/rfc8291) Message Encryption for Web Push | End-to-end encryption between application server and user agent | Library module |
 | [RFC 8188](https://www.rfc-editor.org/rfc/rfc8188) Encrypted Content-Encoding for HTTP | The `aes128gcm` format RFC 8291 builds on | Library module |
 | [RFC 8292](https://www.rfc-editor.org/rfc/rfc8292) Voluntary Application Server Identification (VAPID) | How an application server identifies itself | Implemented |
-| Mozilla push protocol | The WebSocket protocol Firefox speaks to its push service | Implemented for user agents |
+| Firefox push protocol | The WebSocket protocol Firefox speaks to its push service | Implemented for browsers; mobile apps use [bridges](mobile-bridges.md) |
 
 RFC 8030 has two halves. The application server half, how messages are sent, is what every deployed push service accepts. The user agent half delivers messages with HTTP/2 server push, which Chrome and Firefox have since removed and which no browser ever used for Web Push. This service therefore speaks Firefox's WebSocket protocol to user agents, so a stock Firefox can use it. [Architecture](architecture.md#why-the-user-agent-side-is-a-websocket) explains the decision.
 

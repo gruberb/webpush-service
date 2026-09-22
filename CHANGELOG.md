@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 - 2026-09-22
+
+### Added
+
+- Cargo workspace with six crates: `webpush-server` (service and binary),
+  `webpush-store`, `webpush-bridge`, `webpush-fcm`, `webpush-apns`, and
+  `webpush-crypto`.
+- Roles: `all` (one process), `endpoint` (application server API, stateless),
+  and `connect` (WebSocket sessions). Split roles find each other through
+  route records in the store and forward events over an authenticated
+  internal API; stale routes are removed.
+- Mobile delivery through bridges: a registration API for bridged user agents
+  (`/v1/user-agents`, HMAC-derived bearer secrets with key rotation), an FCM
+  HTTP v1 bridge with OAuth 2.0 service account tokens, and an APNs bridge
+  with ES256 provider tokens.
+- Configuration from a TOML file overlaid with `WEBPUSH_*` environment
+  variables, with validation at startup; `config/webpush.example.toml`
+  documents every setting.
+- Graceful shutdown on SIGTERM and SIGINT: readiness fails, listeners stop
+  after a drain delay, sessions close with 1001, in-flight requests finish.
+- Internal listener with `/health`, `/ready`, `/version`, and Prometheus
+  `/metrics`; structured logs in text or JSON with a configurable filter.
+- Connection limit that also covers WebSocket sessions, bounded per
+  connection queues, server pings with idle detection, and batched backlog
+  delivery.
+- Optional user agent expiry after inactivity, and optional CORS for the
+  application server API.
+- Plaintext public listener for deployments behind a TLS-terminating proxy.
+- `Store` operations for user agent records, liveness, bridge addresses,
+  paged backlogs, and routes, all covered by the contract.
+- Test suites for the cluster, bridges and registration, and operations.
+
+### Changed
+
+- A user agent that says `hello` without a known `uaid` is stored on its first
+  `register`, so clients that never subscribe leave no state.
+- A receipt subscription has one open stream at a time; a new stream ends the
+  previous one with `event: gone`.
+- `MemoryStore` clones share state.
+- The encryption library moved from `webpush_service::{ece, vapid}` to
+  `webpush_crypto::{ece, vapid}`, and storage from `webpush_service::store` to
+  `webpush_store`.
+
+### Fixed
+
+- Bigtable conditional writes compared against older cell versions still
+  awaiting garbage collection, so a node could clear a route another node had
+  taken over. Predicates now read only the latest version.
+
 ## 0.1.0 - 2026-09-22
 
 ### Added

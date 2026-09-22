@@ -1,6 +1,6 @@
 # Connecting a client
 
-A client, called the user agent in the RFCs, holds one WebSocket to the push service, registers a subscription per application, and receives messages on that connection. This guide first points Firefox at this service, then explains the protocol for writing your own client.
+A client, called the user agent in the RFCs, holds one WebSocket to the push service, registers a subscription per application, and receives messages on that connection. This guide first points Firefox at this service, then explains the protocol for writing your own client. Mobile apps, which cannot keep a connection open in the background, use a different path: see [Mobile apps](#mobile-apps).
 
 ## Prerequisites
 
@@ -36,7 +36,7 @@ The logged JSON contains the push endpoint and the encryption keys the applicati
 }
 ```
 
-Firefox generates the keys, decrypts messages, and acknowledges them. Nothing else is required. To go back to Mozilla's service, reset `dom.push.serverURL`.
+Firefox generates the keys, decrypts messages, and acknowledges them. Nothing else is required. To go back to Firefox's default service, reset `dom.push.serverURL`.
 
 ## Writing your own client
 
@@ -145,7 +145,7 @@ Decrypt the body with the subscription's keys:
 
 ```rust
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use webpush_service::ece::webpush;
+use webpush_crypto::ece::webpush;
 
 let body = URL_SAFE_NO_PAD.decode(data.trim_end_matches('='))?;
 let plaintext = webpush::decrypt(&ua_private, &auth_secret, &body)?;
@@ -177,9 +177,18 @@ The push endpoint returns `404` from then on, which tells application servers to
 
 ### Keeping the connection alive
 
-Send `{}` when the connection has been idle. The service answers `{}`. Firefox pings every 30 minutes and treats a missing answer within 10 seconds as a dead connection.
+The service sends a WebSocket ping every `websocket.ping_interval` (default 60 seconds), and closes a session that sends nothing, not even a pong, for that interval plus `websocket.pong_timeout`. Most WebSocket libraries answer pings automatically.
+
+Clients can also send `{}` when the connection has been idle; the service answers `{}`. Firefox does this every 30 minutes and treats a missing answer within 10 seconds as a dead connection.
+
+After any close, reconnect with backoff and send `hello` with your `uaid`. [Close codes](websocket-protocol.md#close-codes) lists why the service closes a session.
+
+## Mobile apps
+
+Android and iOS apps receive messages through their platform's push service, not through a WebSocket. The app registers the device token FCM or APNs issued over HTTPS, creates subscriptions with the same `channelID` naming, and decrypts the fields the platform delivers with the same code a WebSocket client uses. [Mobile bridges](mobile-bridges.md) describes the flow and the server configuration.
 
 ## Next steps
 
 - [WebSocket protocol reference](websocket-protocol.md) lists every message.
+- [Mobile bridges](mobile-bridges.md) covers mobile apps.
 - [Connecting a publisher](connecting-a-publisher.md) covers the application server side.

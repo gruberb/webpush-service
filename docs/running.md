@@ -1,17 +1,17 @@
 # Running the service
 
-This guide runs the push service locally, verifies it, connects Firefox to it, and runs the test suite. At the end you have a push service on `https://localhost:8443` that the other guides use.
+This guide runs the push service locally, verifies it, connects Firefox to it, and runs the test suite. At the end you have a push service on `https://localhost:8443` that the other guides use. [Deployment](deployment.md) covers production and multi-node setups.
 
 ## Prerequisites
 
-- Rust 1.97 or later with Cargo. The project uses the 2024 edition.
+- Rust 1.88 or later with Cargo. The workspace uses the 2024 edition.
 - OpenSSL, to create a development certificate.
 - `curl`, to verify the service.
-- Optional: the Google Cloud SDK with the Bigtable emulator (`gcloud components install bigtable cbt`), to run on Bigtable instead of in memory.
+- Optional: the Google Cloud SDK with the Bigtable emulator (`gcloud components install bigtable`), to run on Bigtable instead of in memory.
 
 ## Creating a development certificate
 
-The service only speaks TLS. To create a self-signed P-256 certificate for `localhost`, valid for 30 days:
+To create a self-signed P-256 certificate for `localhost`, valid for 30 days:
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
@@ -21,29 +21,68 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 
 Clients must trust this certificate, or skip verification during development (`curl -k`).
 
-## Starting the service
+## Writing a configuration file
 
-From the repository root, start the service with the certificate paths:
+The service reads a TOML file. The only required setting is `origin`; everything else has a production default, listed in the [configuration reference](configuration.md). For local development, create `webpush.toml` next to the certificate:
 
-```bash
-PUSH_TLS_CERT=cert.pem PUSH_TLS_KEY=key.pem cargo run --release
+```toml
+origin = "https://localhost:8443"
+
+[public.tls]
+cert_file = "cert.pem"
+key_file = "key.pem"
+
+[internal]
+listen = "127.0.0.1:8081"
+
+[shutdown]
+drain_delay = "0s"
 ```
 
-The service listens on `0.0.0.0:8443`, keeps its state in memory, and logs one line per request with the method, status, and latency. Stopping it discards all subscriptions and messages.
+This serves user agents and application servers on `0.0.0.0:8443` over TLS, opens the internal listener for probes and metrics on port 8081, and skips the shutdown drain delay, which only matters behind a load balancer. `config/webpush.example.toml` in the repository lists every setting with its default.
+
+## Starting the service
+
+From the repository root, start the binary with the file:
+
+```bash
+cargo run --release -p webpush-server -- --config webpush.toml
+```
+
+Without `--config`, the binary reads the file named by `WEBPUSH_CONFIG`. With neither, it takes every setting from the environment.
+
+The service keeps its state in memory and logs one line per request with the method, route template, status, and latency. Stopping it discards all subscriptions and messages.
+
+### Overriding settings from the environment
+
+Every setting can be set or overridden with an environment variable: `WEBPUSH_` followed by the setting's path, with `__` between levels. Environment variables take precedence over the file:
+
+| Setting | Variable |
+|---|---|
+| `role` | `WEBPUSH_ROLE=endpoint` |
+| `origin` | `WEBPUSH_ORIGIN=https://push.example.net` |
+| `cluster.token` | `WEBPUSH_CLUSTER__TOKEN=...` |
+| `store.bigtable.table` | `WEBPUSH_STORE__BIGTABLE__TABLE=push` |
+
+Keep secrets (`cluster.token`, `registration.secret_keys`) in the environment rather than in the file.
 
 ## Verifying the service
 
-A subscription needs a user agent session, which `curl` cannot open, but you can confirm the WebSocket endpoint answers. A plain HTTP/1.1 request without a WebSocket upgrade is refused:
+With the internal listener configured, check liveness and readiness:
 
 ```bash
-curl -k -i --http1.1 https://localhost:8443/
+curl -s http://127.0.0.1:8081/health
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8081/ready
 ```
 
 ```text
-HTTP/1.1 400 Bad Request
+ok
+200
 ```
 
-The `400` comes from the WebSocket endpoint on `/`, which means the service is up. To exercise the full flow, connect Firefox as described next, or run the test suite, which subscribes, pushes, and receives over real connections.
+`/ready` answers `200` once the store responds, and `503` from the moment shutdown starts. `/version` returns the crate name and version, and `/metrics` returns Prometheus text; [Deployment](deployment.md#metrics) lists the metrics.
+
+A subscription needs a user agent session, which `curl` cannot open. To exercise the full flow, connect Firefox as described next, or run the test suite.
 
 ## Connecting Firefox
 
@@ -51,82 +90,83 @@ The `400` comes from the WebSocket endpoint on `/`, which means the service is u
 2. In `about:config`, set `dom.push.serverURL` to `wss://localhost:8443/`.
 3. Restart Firefox.
 
-Subscriptions created by any page now have endpoints on `https://localhost:8443/push/`. [Connecting a client](connecting-a-client.md#using-firefox) shows a subscription from JavaScript, and [Sending a message](sending-a-message.md) sends one to it. To switch back to Mozilla's service, reset `dom.push.serverURL`.
+Subscriptions created by any page now have endpoints on `https://localhost:8443/push/`. [Connecting a client](connecting-a-client.md#using-firefox) shows a subscription from JavaScript, and [Sending a message](sending-a-message.md) sends one to it. To switch back to Firefox's default service, reset `dom.push.serverURL`.
 
-## Configuration
+## Logs
 
-The binary reads its configuration from environment variables:
+Logs go to standard output. Two settings control them:
 
-| Variable | Default | Description |
+| Setting | Values | Default |
 |---|---|---|
-| `PUSH_LISTEN` | `0.0.0.0:8443` | Listen address |
-| `PUSH_ORIGIN` | `https://localhost:8443` | Public origin. Base of every push endpoint and URL the service issues, and the value VAPID `aud` claims must match. Set it to the address clients use |
-| `PUSH_TLS_CERT` | required | Path to the PEM certificate chain, leaf first |
-| `PUSH_TLS_KEY` | required | Path to the PEM private key |
-| `PUSH_STORE` | `memory` | `memory`, or `bigtable` when built with `--features bigtable` |
-| `BIGTABLE_ENDPOINT` | `http://127.0.0.1:8086` | Bigtable gRPC endpoint |
-| `BIGTABLE_PROJECT` | `dev` | Google Cloud project |
-| `BIGTABLE_INSTANCE` | `dev` | Bigtable instance |
-| `BIGTABLE_TABLE` | `push` | Table name |
+| `log.level` | A `tracing` filter, for example `info` or `info,webpush_server=debug` | `info` |
+| `log.format` | `text` for people, `json` for log collectors | `text` |
 
-The following limits are fixed in the binary. Embedding applications set them through `webpush_service::Config`:
+`RUST_LOG`, when set, replaces `log.level`. Logs never contain capability URLs, message bodies, or device tokens: request lines record the route template (`/push/{id}`), not the path.
 
-| Setting | Value | Why |
-|---|---|---|
-| Maximum TTL | 60 days | Longer requests are reduced, and the response `TTL` reports the value used |
-| Maximum body | 4096 octets | The minimum RFC 8030 requires every push service to accept |
-| Reaper interval | 1 second | How quickly `410` receipts follow expiry |
+## Stopping the service
 
-`PUSH_ORIGIN` must match what clients see. If the service runs behind a load balancer on `https://push.example.net`, set `PUSH_ORIGIN=https://push.example.net`, or VAPID tokens from application servers fail with `403`.
+On SIGTERM or SIGINT the service shuts down in stages:
+
+1. `/ready` starts answering `503`.
+2. After `shutdown.drain_delay` (default 5 seconds), listeners stop accepting, sessions close with WebSocket code 1001, receipt streams end, and in-flight requests finish.
+3. The process exits once everything has finished, or after `shutdown.timeout` (default 30 seconds).
+
+Firefox reconnects after a 1001 close, so a rolling restart loses no messages: undelivered messages stay in the store and arrive on the next session.
 
 ## Running on Bigtable
 
-The Bigtable adapter keeps state across restarts. It currently supports the emulator; production Bigtable needs TLS and Google Cloud authentication on the gRPC channel, which is not implemented yet.
+The Bigtable adapter keeps state across restarts and lets several nodes share it. It currently supports the emulator only; production Bigtable needs TLS and Google Cloud authentication on the gRPC channel, which is not implemented yet.
 
-To start the emulator on port 8086, run this in its own terminal:
+The binary includes the adapter when built with the `bigtable` feature. To start the emulator on port 8086, run this in its own terminal:
 
 ```bash
 gcloud beta emulators bigtable start --host-port=127.0.0.1:8086
 ```
 
-In a second terminal, create the table with its two column families. [Architecture](architecture.md#bigtable-layout) explains what each holds:
+Then add the store to `webpush.toml`. `create_table` creates the table and its column families if they do not exist, which is convenient against the emulator; provision production tables ahead of time instead:
 
-```bash
-export BIGTABLE_EMULATOR_HOST=127.0.0.1:8086
-cbt -project dev -instance dev createtable push
-cbt -project dev -instance dev createfamily push d
-cbt -project dev -instance dev createfamily push m
-cbt -project dev -instance dev setgcpolicy push d maxversions=1
-cbt -project dev -instance dev setgcpolicy push m "maxversions=1 or maxage=61d"
+```toml
+[store.bigtable]
+endpoint = "http://127.0.0.1:8086"
+project = "dev"
+instance = "dev"
+table = "push"
+create_table = true
 ```
 
-The `m` family's maximum age is the 60-day TTL limit plus one day, so Bigtable discards expired messages on its own. Then start the service with the adapter:
+Start the service with the feature enabled:
 
 ```bash
-PUSH_STORE=bigtable PUSH_TLS_CERT=cert.pem PUSH_TLS_KEY=key.pem cargo run --release --features bigtable
+cargo run --release -p webpush-server --features bigtable -- --config webpush.toml
 ```
 
-Embedding applications can call `BigtableStore::ensure_table` instead of using `cbt`; it creates the same schema.
+The message column family's maximum age is `push.max_ttl` plus one day, so Bigtable discards expired messages on its own. [Architecture](architecture.md#bigtable-layout) describes the layout.
 
 ## Running the tests
 
 The whole suite runs against the in-memory store and needs nothing else:
 
 ```bash
-cargo test
+cargo test --workspace
 ```
 
-It covers the RFC test vectors, the application server interface, the user agent WebSocket protocol, and the storage contract. Test names cite the requirement they check; tests whose names start with `policy_` cover choices the specifications leave open.
+It covers the RFC test vectors, the application server interface, the user agent WebSocket protocol, the registration API and bridge delivery, clusters of endpoint and connection nodes, shutdown, limits, and the storage contract. The FCM and APNs bridges are tested against local fakes of the platform APIs. Test names cite the requirement they check; tests whose names start with `policy_` cover choices the specifications leave open.
 
-To also check the Bigtable adapter against its contract, and to run every conformance test on Bigtable, enable the feature. Each test starts its own emulator, found through `$CBTEMULATOR` or the gcloud installation:
+To check the Bigtable adapter against its contract, and to run every server test on Bigtable, enable the feature. Each test starts its own emulator, found through `$CBTEMULATOR` or the gcloud installation:
 
 ```bash
-cargo test --features bigtable
-PUSH_TEST_STORE=bigtable cargo test --features bigtable
+cargo test -p webpush-store --features bigtable
+PUSH_TEST_STORE=bigtable cargo test -p webpush-server --features bigtable
+```
+
+The lint gate is clippy with the workspace's pedantic settings:
+
+```bash
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ## Next steps
 
 - [Connecting a client](connecting-a-client.md) subscribes and receives messages.
 - [Connecting a publisher](connecting-a-publisher.md) prepares an application server.
-- [Storage adapters](storage-adapters.md) adds a database of your choice.
+- [Deployment](deployment.md) scales the service out.

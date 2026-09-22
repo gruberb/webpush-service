@@ -1,0 +1,20 @@
+[package]
+name = "webpush-crypto"
+description = "Web Push message encryption (RFC 8291, RFC 8188) and VAPID verification (RFC 8292)"
+keywords = ["webpush", "rfc8291", "rfc8188", "vapid", "encryption"]
+categories = ["cryptography"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+base64.workspace = true
+hkdf.workspace = true
+p256.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

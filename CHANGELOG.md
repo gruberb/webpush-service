@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 - 2026-09-22
+
+### Added
+
+- `websocket.max_session`: sessions close with 1001 after a jittered
+  lifetime and clients reconnect. Bounds how long clients stay on an
+  instance nothing routes to (platforms that keep an old instance alive
+  during a rollout) and rebalances connections after a scale-out.
+
+### Fixed
+
+- `BigtableStore::ensure_table` against Cloud Bigtable: table
+  administration goes to `bigtableadmin.googleapis.com`; the data host
+  answered `Unimplemented`. Found by the live contract test.
+
+### Removed
+
+- The design spec document from the repository and its history; tests and
+  docs no longer refer to it.
+
 ## 0.3.0 - 2026-09-22
 
 ### Added

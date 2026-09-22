@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-apns"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-bridge"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-crypto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-fcm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-gcp-auth"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2869,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",

@@ -1,4 +1,4 @@
-//! User agent protocol conformance (`TECH_SPEC.md` §4.5): the WebSocket
+//! User agent protocol conformance: the WebSocket
 //! protocol Firefox speaks to its push server. Messages are sent exactly as
 //! Firefox sends them (`dom/push/PushServiceWebSocket.sys.mjs`), and replies
 //! are checked for what Firefox checks plus the service's own requirements.

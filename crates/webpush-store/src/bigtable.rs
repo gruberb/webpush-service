@@ -111,10 +111,26 @@ impl BigtableConfig {
     /// A gRPC channel to the endpoint. The keepalive notices a dead
     /// connection before a request waits on it.
     async fn channel(&self) -> Result<Channel> {
-        let mut endpoint = Channel::from_shared(self.endpoint.clone())?
+        Self::connect_to(&self.endpoint).await
+    }
+
+    /// A channel to the admin API. Cloud Bigtable serves it on its own host,
+    /// `bigtableadmin.googleapis.com`; the emulator serves both APIs on one
+    /// port.
+    async fn admin_channel(&self) -> Result<Channel> {
+        let admin = self.endpoint.replace(
+            "//bigtable.googleapis.com",
+            "//bigtableadmin.googleapis.com",
+        );
+        Self::connect_to(&admin).await
+    }
+
+    /// A channel to `url`, with TLS for `https`.
+    async fn connect_to(url: &str) -> Result<Channel> {
+        let mut endpoint = Channel::from_shared(url.to_owned())?
             .http2_keep_alive_interval(Duration::from_secs(30))
             .keep_alive_while_idle(true);
-        if self.endpoint.starts_with("https://") {
+        if url.starts_with("https://") {
             endpoint = endpoint.tls_config(ClientTlsConfig::new().with_webpki_roots())?;
         }
         Ok(endpoint.connect().await?)
@@ -354,8 +370,9 @@ impl BigtableStore {
     /// the emulator should retry until it accepts connections.
     pub async fn ensure_table(cfg: &BigtableConfig) -> Result<()> {
         use admin::{GcRule, gc_rule::Rule};
-        let mut client =
-            admin::bigtable_table_admin_client::BigtableTableAdminClient::new(cfg.channel().await?);
+        let mut client = admin::bigtable_table_admin_client::BigtableTableAdminClient::new(
+            cfg.admin_channel().await?,
+        );
         let auth = cfg.auth()?;
         let get = admin::GetTableRequest {
             name: cfg.table_name(),

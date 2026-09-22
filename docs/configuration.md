@@ -58,6 +58,7 @@ Without `[cluster]`, `role` must be `all`.
 | `pong_timeout` | `"30s"` | A session silent for `ping_interval` plus this long is closed |
 | `backlog_batch` | `100` | Stored messages sent per batch on connect. The next batch follows the acknowledgement of the previous one |
 | `queue` | `128` | Live events buffered per connection. A connection that falls this far behind is closed and catches up from storage |
+| `max_session` | unset | Close sessions with 1001 after this long, jittered by up to 20% either way, so clients reconnect. Unset keeps sessions open indefinitely |
 
 ## `[receipts]`: receipt streams
 
@@ -150,7 +151,7 @@ A cluster cannot use the memory store, because separate processes cannot share i
 The service refuses to start when settings contradict each other:
 
 - `origin` is not `https://` or ends in `/`.
-- `push.max_payload` is below 4096, or `websocket.backlog_batch`, `websocket.queue`, or `public.max_connections` is zero.
+- `push.max_payload` is below 4096, or `websocket.backlog_batch`, `websocket.queue`, `websocket.max_session`, or `public.max_connections` is zero.
 - `role` is `endpoint` or `connect` without `[cluster]`.
 - `[cluster]` without `[internal]`, a `cluster.token` shorter than 16 characters, or a `node_url` that is not `http://` or `https://`.
 - A bridge is configured without `registration.secret_keys`, or a secret key is shorter than 32 characters.

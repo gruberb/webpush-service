@@ -252,6 +252,15 @@ pub struct WebSocket {
     /// behind is closed; the user agent reconnects and reads the rest from
     /// storage.
     pub queue: usize,
+    /// Longest a session stays open. When it ends, the session closes with
+    /// 1001 and the client reconnects, possibly to another instance. This
+    /// moves clients off instances nothing routes to anymore (a platform
+    /// that keeps an old instance alive during a rollout) and spreads
+    /// connections after a scale-out. Each session's limit varies by up to
+    /// 20% either way, so a node's clients do not reconnect at once. Unset
+    /// keeps sessions open indefinitely.
+    #[serde(with = "humantime_serde")]
+    pub max_session: Option<Duration>,
 }
 
 impl Default for WebSocket {
@@ -262,6 +271,7 @@ impl Default for WebSocket {
             pong_timeout: Duration::from_secs(30),
             backlog_batch: 100,
             queue: 128,
+            max_session: None,
         }
     }
 }
@@ -482,6 +492,9 @@ impl Config {
         }
         if self.push.max_payload < 4096 {
             return Err("push.max_payload must be at least 4096 (RFC 8030 §7.2)".into());
+        }
+        if self.websocket.max_session.is_some_and(|d| d.is_zero()) {
+            return Err("websocket.max_session must be positive".into());
         }
         if self.websocket.backlog_batch == 0 || self.websocket.queue == 0 {
             return Err("websocket.backlog_batch and websocket.queue must be positive".into());

@@ -1,7 +1,7 @@
 //! RFC 8030 conformance: the application server interface (push, TTL,
 //! Urgency, Topic, receipts, message resource) exercised over HTTPS, with
 //! delivery and acknowledgement observed through a Firefox-compatible user
-//! agent session. Requirement IDs refer to `TECH_SPEC.md` §4.
+//! agent session. Each test names the requirement it checks.
 //!
 //! Black box: every URI is discovered through `pushEndpoint`, `Location`, or
 //! `Link`; invalid ids are made by mangling discovered URIs.

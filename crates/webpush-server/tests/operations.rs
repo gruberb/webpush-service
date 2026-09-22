@@ -200,3 +200,26 @@ async fn cors_preflight() {
         "{r:?}"
     );
 }
+
+/// With `max_session`, a session ends with 1001 after its (jittered)
+/// lifetime, and a message stored meanwhile arrives after reconnecting.
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_end_after_max_session() {
+    let server = server("[websocket]\nmax_session = \"400ms\"\n").await;
+    let mut ua = server.ua().await;
+    let uaid = ua.hello(None).await;
+    let sub = ua.subscribe(None).await;
+    let started = std::time::Instant::now();
+    assert_eq!(ua.close_code().await, Some(1001));
+    let lived = started.elapsed();
+    assert!(
+        lived >= Duration::from_millis(250) && lived < Duration::from_secs(2),
+        "{lived:?}"
+    );
+    let http = server.http().await;
+    http.request("POST", &sub.push, &[("ttl", "60")], b"while away")
+        .await;
+    let mut ua = server.ua().await;
+    ua.hello(Some(&uaid)).await;
+    assert_eq!(ua.next_notification().await.data(), b"while away");
+}

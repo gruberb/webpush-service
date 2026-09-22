@@ -41,7 +41,7 @@ Dependencies point one way: `webpush-server` depends on the other crates, and th
 | [RFC 8188](https://www.rfc-editor.org/rfc/rfc8188) | Encrypted Content-Encoding for HTTP | `webpush_crypto::ece` (`aes128gcm`) |
 | [Firefox push protocol](https://firefox-source-docs.mozilla.org/dom/push/) | WebSocket protocol between Firefox and its push server | The browser side: sessions, subscriptions, delivery, acknowledgement |
 
-RFC 8030 delivers messages to user agents, and receipts to application servers, with HTTP/2 server push. Chrome 106 and Firefox 132 removed server push, and no browser ever used RFC 8030 for Web Push delivery. This service therefore speaks Firefox's WebSocket protocol to browsers, uses platform bridges for mobile applications, and streams receipts as Server-Sent Events. Everything an application server sees is unchanged. [Architecture](docs/architecture.md) explains the decision, and the [design spec](TECH_SPEC.md#46-deviations-from-rfc-8030) lists the deviations requirement by requirement.
+RFC 8030 delivers messages to user agents, and receipts to application servers, with HTTP/2 server push. Chrome 106 and Firefox 132 removed server push, and no browser ever used RFC 8030 for Web Push delivery. This service therefore speaks Firefox's WebSocket protocol to browsers, uses platform bridges for mobile applications, and streams receipts as Server-Sent Events. Everything an application server sees is unchanged. [Architecture](docs/architecture.md) explains the decision. Each conformance test's doc comment names the requirement it checks.
 
 The service also relies on these specifications:
 

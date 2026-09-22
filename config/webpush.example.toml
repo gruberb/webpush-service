@@ -48,6 +48,9 @@ pong_timeout = "30s"
 backlog_batch = 100
 # Live events buffered per connection before it is closed with 1013.
 queue = 128
+# Close sessions with 1001 after this long (jittered by 20%) so clients
+# reconnect: moves them off stale instances and rebalances after scale-out.
+# max_session = "1h"
 
 [receipts]
 keepalive = "30s"

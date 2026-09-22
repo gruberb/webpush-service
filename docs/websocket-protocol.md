@@ -24,7 +24,7 @@ Every message is an object with a `messageType` field, except the short ping for
 | Code | Sent when |
 |---|---|
 | `1000` | A newer session for the same `uaid` replaced this one (reason `replaced`) |
-| `1001` | The service is shutting down, or the session was idle past the limit |
+| `1001` | The service is shutting down, the session was idle past the limit, or it reached `websocket.max_session` |
 | `1002` | Protocol error: first message not `hello`, a second `hello`, or an invalid message |
 | `1003` | The client sent a binary frame |
 | `1013` | The session fell more than `websocket.queue` events behind. Reconnect; the missed messages are in storage |

@@ -35,7 +35,10 @@
 //! and never subscribe leave no state behind.
 //!
 //! The backlog goes out in batches of `websocket.backlog_batch`; the next
-//! batch is read once every message sent so far has been acknowledged. See
+//! batch is read once every message sent so far has been acknowledged.
+//!
+//! With `websocket.max_session`, a session ends with 1001 after its lifetime,
+//! jittered by up to 20% either way, and the client reconnects. See
 //! `docs/websocket-protocol.md`.
 
 use std::{
@@ -53,6 +56,7 @@ use axum::{
     response::Response,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use webpush_store::{BoxError, Recipient, Store, UserAgent, is_uaid, new_uaid, now_ms};
@@ -168,6 +172,8 @@ enum Step {
     Tick,
     /// The service is shutting down.
     Stop,
+    /// The session reached `websocket.max_session`.
+    Expired,
 }
 
 /// One connected user agent.
@@ -251,12 +257,21 @@ impl<S: Store> Session<S> {
         let (ping, pong_timeout) = (ws.ping_interval, ws.pong_timeout);
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + ping, ping);
         let stopping = self.app.shutdown.stopping.clone();
+        let expiry = lifetime(ws.max_session).map(|d| tokio::time::Instant::now() + d);
+        let expired = async {
+            match expiry {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(expired);
         loop {
             let step = tokio::select! {
                 frame = self.socket.recv() => Step::Frame(frame),
                 event = listener.rx.recv() => Step::Event(event),
                 _ = tick.tick() => Step::Tick,
                 () = stopping.cancelled() => Step::Stop,
+                () = &mut expired => Step::Expired,
             };
             match step {
                 Step::Frame(None | Some(Err(_) | Ok(Frame::Close(_)))) => return Ok(()),
@@ -303,6 +318,7 @@ impl<S: Store> Session<S> {
                     }
                 }
                 Step::Stop => return self.close(close_code::AWAY, "shutting down").await,
+                Step::Expired => return self.close(close_code::AWAY, "session lifetime").await,
             }
         }
     }
@@ -461,6 +477,20 @@ impl<S: Store> Session<S> {
     }
 }
 
+/// This session's lifetime: `max`, scaled by a random factor between 0.8 and
+/// 1.2 so that sessions opened together do not all end together.
+fn lifetime(max: Option<Duration>) -> Option<Duration> {
+    let max = max?;
+    let mut byte = [0u8; 1];
+    // Jitter needs no cryptographic quality; without randomness, use `max`.
+    let factor = if SystemRandom::new().fill(&mut byte).is_ok() {
+        0.8 + 0.4 * f64::from(byte[0]) / 255.0
+    } else {
+        1.0
+    };
+    Some(max.mul_f64(factor))
+}
+
 /// The next client message, skipping WebSocket control frames. `None` when
 /// the connection ends or the frame is not a valid message.
 async fn next_text(socket: &mut WebSocket) -> Option<ClientMessage> {
@@ -486,6 +516,16 @@ async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifetime_is_jittered_within_bounds() {
+        assert_eq!(lifetime(None), None);
+        let max = Duration::from_secs(600);
+        for _ in 0..100 {
+            let d = lifetime(Some(max)).unwrap();
+            assert!(d >= max.mul_f64(0.8) && d <= max.mul_f64(1.2), "{d:?}");
+        }
+    }
 
     #[test]
     fn parses_firefox_messages() {

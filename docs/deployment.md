@@ -95,6 +95,8 @@ terminationGracePeriodSeconds  >  shutdown.drain_delay + shutdown.timeout
 
 Connection nodes close their sessions with WebSocket code 1001 when they stop. Firefox reconnects, the load balancer sends it to another node, and the new session receives every undelivered message from the store.
 
+Some platforms do not stop an old instance while it holds WebSockets. Cloud Run, for example, keeps a replaced revision's instance running until its open requests end or reach the request timeout, and sends no SIGTERM meanwhile. A single `role = "all"` instance on such a platform keeps its sessions after a rollout, while new pushes arrive at the new instance, so those sessions miss them until they reconnect. Set `websocket.max_session`, for example to `"10m"`, to bound that window: sessions end with 1001, clients reconnect to the current instance, and messages stored meanwhile arrive with the backlog.
+
 ## Metrics
 
 `GET /metrics` on the internal listener returns the Prometheus text format. Labels never contain capability URLs or tokens; request metrics use the route template.
@@ -122,6 +124,7 @@ Useful signals: a rising `outcome="failed"` rate means nodes cannot reach each o
 | `public.max_connections` | 100000 | Upper bound on open connections per node, WebSocket sessions included. Excess connections wait in the kernel accept queue. Size it together with the process file descriptor limit |
 | `websocket.queue` | 128 | Live events buffered per session. Higher values tolerate slower clients at the cost of memory |
 | `websocket.backlog_batch` | 100 | Stored messages read and sent at once on connect. Lower values reduce memory and store reads per batch for user agents with long backlogs |
+| `websocket.max_session` | unset | Session lifetime before a 1001 close and reconnect. On Kubernetes, one to a few hours rebalances connections after a scale-out; see below for platforms that keep old instances alive |
 | `websocket.ping_interval` | 60s | One small frame per session per interval. Shorter intervals keep load balancers happy at the cost of traffic |
 | `user_agents.sweep_interval` | 1h | On Bigtable the sweep scans every user agent row; keep it infrequent |
 

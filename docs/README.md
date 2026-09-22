@@ -19,7 +19,6 @@ These pages explain how Web Push works and how to run and use this push service.
 | Change or review the implementation | [Architecture](architecture.md) |
 | Look up a user agent message | [WebSocket protocol reference](websocket-protocol.md) |
 | Look up an endpoint, header, or status code | [HTTP reference](http-reference.md) |
-| Check a requirement ID cited by a test (`WP-`, `FX-`, `VAP-`, …) | [Design spec](../TECH_SPEC.md) |
 
 ## Terminology
 

@@ -1,0 +1,623 @@
+//! Cloud Bigtable [`Store`], accessed over gRPC.
+//!
+//! ```text
+//!  family d (1 version)                   family m (1 version, max age)
+//!  ua#{uaid}           c                  msg#{uaid}#t:{ch}:{topic}  message
+//!  ch#{uaid}#{ch}      push, vapid        msg#{uaid}#{accepted}{id}  message
+//!  push#{push}         uaid, ch           mid#{id}                   row key
+//!  rsub#{rsub}         c
+//!  rq#{rsub}#{seq}     msg, status
+//!  rexp#{expiry}#{id}  row
+//! ```
+//!
+//! Bigtable only makes single-row writes atomic, and the layout relies on
+//! that:
+//!
+//! ```text
+//!  topic replacement                 delete / reap of message A
+//!  -----------------                 --------------------------
+//!  msg#{uaid}#t:{ch}:news            mid#A --> msg#{uaid}#t:{ch}:news
+//!    [delete row, set cells]         CheckAndMutate(id == A)
+//!    one atomic mutation               matched: delete it
+//!                                      replaced by B: no match, None
+//! ```
+//!
+//! Index rows are written after, and deleted after, the rows they point at,
+//! so a reader can meet an orphan index row (ignored) but never a half
+//! written one. See `docs/architecture.md` (Storage).
+
+use std::collections::HashMap;
+
+use bytes::Bytes;
+use googleapis_tonic_google_bigtable_admin_v2::google::bigtable::admin::v2 as admin;
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{
+    self as bt, bigtable_client::BigtableClient, read_rows_response::cell_chunk::RowStatus,
+    row_filter::Filter, row_range,
+};
+use tonic::{Code, transport::Channel};
+
+use super::{Message, Receipt, Store, Subscription, Urgency, new_uaid, next_seq};
+use crate::{BoxError, new_id, now_ms};
+
+/// Result of a storage operation. Errors are gRPC or decoding failures.
+type Result<T> = std::result::Result<T, BoxError>;
+/// Latest cell value per column qualifier.
+type Row = HashMap<Vec<u8>, Vec<u8>>;
+
+/// Column family for user agents, subscriptions, receipts, and indexes.
+const D: &str = "d";
+/// Column family for messages and the message id index.
+const M: &str = "m";
+
+/// Where the Bigtable table lives.
+#[derive(Clone, Debug)]
+pub struct BigtableConfig {
+    /// gRPC endpoint, for example `http://127.0.0.1:8086` for the emulator.
+    /// Only plaintext endpoints are supported.
+    pub endpoint: String,
+    /// Google Cloud project that contains the instance.
+    pub project: String,
+    /// Bigtable instance id.
+    pub instance: String,
+    /// Table id.
+    pub table: String,
+    /// The service's maximum TTL in seconds. [`BigtableStore::ensure_table`]
+    /// keeps message cells for this long plus one day.
+    pub max_ttl: u32,
+}
+
+impl BigtableConfig {
+    /// Fully qualified table name, as the Bigtable API expects it.
+    fn table_name(&self) -> String {
+        format!(
+            "projects/{}/instances/{}/tables/{}",
+            self.project, self.instance, self.table
+        )
+    }
+
+    /// A gRPC channel to the endpoint.
+    async fn channel(&self) -> Result<Channel> {
+        Ok(Channel::from_shared(self.endpoint.clone())?
+            .connect()
+            .await?)
+    }
+}
+
+/// A [`Store`] backed by one Cloud Bigtable table.
+///
+/// Cheap to clone; clones share one gRPC channel.
+#[derive(Clone)]
+pub struct BigtableStore {
+    /// Data API client.
+    client: BigtableClient<Channel>,
+    /// Fully qualified table name.
+    table: String,
+}
+
+/// A UTF-8 cell value.
+fn text(row: &Row, col: &str) -> Option<String> {
+    row.get(col.as_bytes())
+        .and_then(|v| String::from_utf8(v.clone()).ok())
+}
+
+/// A cell holding a decimal integer.
+fn number(row: &Row, col: &str) -> Option<u64> {
+    text(row, col)?.parse().ok()
+}
+
+/// A mutation writing one cell at timestamp `ts_ms` (Unix milliseconds).
+fn set_cell(family: &str, col: &str, value: impl Into<Vec<u8>>, ts_ms: u64) -> bt::Mutation {
+    bt::Mutation {
+        mutation: Some(bt::mutation::Mutation::SetCell(bt::mutation::SetCell {
+            family_name: family.to_owned(),
+            column_qualifier: col.as_bytes().to_vec(),
+            // Bigtable tables default to millisecond timestamp granularity.
+            timestamp_micros: (ts_ms * 1000).cast_signed(),
+            value: value.into(),
+        })),
+    }
+}
+
+/// A mutation deleting every cell in the row.
+fn delete_row() -> bt::Mutation {
+    bt::Mutation {
+        mutation: Some(bt::mutation::Mutation::DeleteFromRow(
+            bt::mutation::DeleteFromRow {},
+        )),
+    }
+}
+
+/// Wrap a filter variant in a `RowFilter`.
+fn filter(f: Filter) -> bt::RowFilter {
+    bt::RowFilter { filter: Some(f) }
+}
+
+/// Keys in `[start, end)`.
+fn range(start: String, end: String) -> bt::RowSet {
+    bt::RowSet {
+        row_keys: vec![],
+        row_ranges: vec![bt::RowRange {
+            start_key: Some(row_range::StartKey::StartKeyClosed(start.into_bytes())),
+            end_key: Some(row_range::EndKey::EndKeyOpen(end.into_bytes())),
+        }],
+    }
+}
+
+/// Every key starting with `prefix`. Prefixes always end in `#`, and the
+/// next byte up, `$`, bounds the range.
+fn prefix(prefix: String) -> bt::RowSet {
+    let end = format!("{}$", prefix.strip_suffix('#').unwrap_or(&prefix));
+    range(prefix, end)
+}
+
+/// The message row: keyed by topic when there is one, so a replacement
+/// overwrites it, otherwise by acceptance time so rows sort oldest first.
+fn message_key(m: &Message) -> String {
+    match &m.topic {
+        Some(t) => format!("msg#{}#t:{}:{t}", m.uaid, m.channel_id),
+        None => format!("msg#{}#{:016x}{}", m.uaid, m.accepted, m.id),
+    }
+}
+
+/// Decode a message row. `None` for a row that is incomplete, which happens
+/// only if a write was interrupted.
+fn message_from_row(key: &str, row: &Row) -> Option<Message> {
+    let (uaid, slot) = key.strip_prefix("msg#")?.split_once('#')?;
+    let topic = slot
+        .strip_prefix("t:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(_, topic)| topic.to_owned());
+    Some(Message {
+        id: text(row, "id")?,
+        uaid: uaid.to_owned(),
+        channel_id: text(row, "ch")?,
+        push: text(row, "push")?,
+        topic,
+        body: Bytes::copy_from_slice(row.get(&b"body"[..])?),
+        ctype: text(row, "ctype"),
+        cenc: text(row, "cenc"),
+        ttl: number(row, "ttl")?.try_into().ok()?,
+        urgency: Urgency::parse(&text(row, "urgency")?)?,
+        accepted: number(row, "accepted")?,
+        expiry: number(row, "expiry")?,
+        rsub: text(row, "rsub"),
+    })
+}
+
+impl BigtableStore {
+    /// Connect to the table named in `cfg`. The table must exist; see
+    /// [`BigtableStore::ensure_table`].
+    ///
+    /// # Errors
+    ///
+    /// The endpoint is not a valid URI or does not accept connections.
+    pub async fn connect(cfg: &BigtableConfig) -> Result<Self> {
+        Ok(BigtableStore {
+            client: BigtableClient::new(cfg.channel().await?),
+            table: cfg.table_name(),
+        })
+    }
+
+    /// Create the table and its column families if they do not exist.
+    /// Intended for the emulator and development; production tables should
+    /// be provisioned ahead of time with the same schema.
+    ///
+    /// # Errors
+    ///
+    /// Connection failures and admin API errors. Callers starting alongside
+    /// the emulator should retry until it accepts connections.
+    pub async fn ensure_table(cfg: &BigtableConfig) -> Result<()> {
+        use admin::{GcRule, gc_rule::Rule};
+        let mut client =
+            admin::bigtable_table_admin_client::BigtableTableAdminClient::new(cfg.channel().await?);
+        let get = admin::GetTableRequest {
+            name: cfg.table_name(),
+            ..Default::default()
+        };
+        match client.get_table(get).await {
+            Ok(_) => return Ok(()),
+            Err(s) if s.code() == Code::NotFound => {}
+            Err(s) => return Err(s.into()),
+        }
+
+        let versions = || GcRule {
+            rule: Some(Rule::MaxNumVersions(1)),
+        };
+        // Messages are also collected by age, so expired ones need no sweeper.
+        let max_age = GcRule {
+            rule: Some(Rule::MaxAge(prost_types::Duration {
+                seconds: i64::from(cfg.max_ttl) + 86400,
+                nanos: 0,
+            })),
+        };
+        let family = |rule| admin::ColumnFamily {
+            gc_rule: Some(rule),
+            ..Default::default()
+        };
+        let families = HashMap::from([
+            (D.to_owned(), family(versions())),
+            (
+                M.to_owned(),
+                family(GcRule {
+                    rule: Some(Rule::Union(admin::gc_rule::Union {
+                        rules: vec![versions(), max_age],
+                    })),
+                }),
+            ),
+        ]);
+        let create = admin::CreateTableRequest {
+            parent: format!("projects/{}/instances/{}", cfg.project, cfg.instance),
+            table_id: cfg.table.clone(),
+            table: Some(admin::Table {
+                column_families: families,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match client.create_table(create).await {
+            Err(s) if s.code() != Code::AlreadyExists => Err(s.into()),
+            _ => Ok(()),
+        }
+    }
+
+    // -- primitives ---------------------------------------------------------
+
+    /// Apply `mutations` to one row, atomically.
+    async fn mutate(&self, key: &str, mutations: Vec<bt::Mutation>) -> Result<()> {
+        let req = bt::MutateRowRequest {
+            table_name: self.table.clone(),
+            row_key: key.as_bytes().to_vec(),
+            mutations,
+            ..Default::default()
+        };
+        self.client.clone().mutate_row(req).await?;
+        Ok(())
+    }
+
+    /// Write cells to one row at the current time.
+    async fn put(&self, key: &str, family: &str, cols: &[(&str, &[u8])]) -> Result<()> {
+        let now = now_ms();
+        let cells = cols.iter().map(|(c, v)| set_cell(family, c, *v, now));
+        self.mutate(key, cells.collect()).await
+    }
+
+    /// Delete a row. Deleting a missing row is not an error.
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.mutate(key, vec![delete_row()]).await
+    }
+
+    /// Read rows, merging `CellChunk`s into whole rows.
+    async fn read(&self, rows: bt::RowSet) -> Result<Vec<(String, Row)>> {
+        let req = bt::ReadRowsRequest {
+            table_name: self.table.clone(),
+            rows: Some(rows),
+            filter: Some(filter(Filter::CellsPerColumnLimitFilter(1))),
+            ..Default::default()
+        };
+        let mut stream = self.client.clone().read_rows(req).await?.into_inner();
+        let mut out = Vec::new();
+        // Row key and qualifier are reused from earlier chunks when omitted,
+        // and a value split over several chunks is concatenated until a chunk
+        // arrives with `value_size == 0`.
+        let (mut key, mut qualifier) = (Vec::new(), Vec::new());
+        let (mut row, mut value) = (Row::new(), Vec::new());
+        while let Some(resp) = stream.message().await? {
+            for chunk in resp.chunks {
+                if chunk.row_status == Some(RowStatus::ResetRow(true)) {
+                    row.clear();
+                    value.clear();
+                    continue;
+                }
+                if !chunk.row_key.is_empty() {
+                    key = chunk.row_key;
+                }
+                if let Some(q) = chunk.qualifier {
+                    qualifier = q;
+                }
+                value.extend_from_slice(&chunk.value);
+                if chunk.value_size == 0 {
+                    row.insert(qualifier.clone(), std::mem::take(&mut value));
+                }
+                if chunk.row_status == Some(RowStatus::CommitRow(true)) {
+                    let k = String::from_utf8(key.clone())?;
+                    out.push((k, std::mem::take(&mut row)));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read one row.
+    async fn get(&self, key: &str) -> Result<Option<Row>> {
+        let rows = bt::RowSet {
+            row_keys: vec![key.as_bytes().to_vec()],
+            row_ranges: vec![],
+        };
+        Ok(self.read(rows).await?.pop().map(|(_, row)| row))
+    }
+
+    /// Whether a row exists.
+    async fn exists(&self, key: &str) -> Result<bool> {
+        Ok(self.get(key).await?.is_some())
+    }
+
+    /// Delete the message row `key` only if it still holds message `id`.
+    /// Returns whether it did.
+    async fn delete_message_row(&self, key: &str, id: &str) -> Result<bool> {
+        let predicate = Filter::Chain(bt::row_filter::Chain {
+            filters: vec![
+                filter(Filter::FamilyNameRegexFilter(M.to_owned())),
+                filter(Filter::ColumnQualifierRegexFilter(b"^id$".to_vec())),
+                // Ids are base64url, so they contain no regex metacharacters.
+                filter(Filter::ValueRegexFilter(format!("^{id}$").into_bytes())),
+            ],
+        });
+        let req = bt::CheckAndMutateRowRequest {
+            table_name: self.table.clone(),
+            row_key: key.as_bytes().to_vec(),
+            predicate_filter: Some(filter(predicate)),
+            true_mutations: vec![delete_row()],
+            ..Default::default()
+        };
+        let resp = self.client.clone().check_and_mutate_row(req).await?;
+        Ok(resp.into_inner().predicate_matched)
+    }
+
+    /// Resolve a message id to its row key and current contents. `None` if
+    /// unknown or replaced.
+    async fn locate(&self, id: &str) -> Result<Option<(String, Message)>> {
+        let Some(idx) = self.get(&format!("mid#{id}")).await? else {
+            return Ok(None);
+        };
+        let Some(key) = text(&idx, "row") else {
+            return Ok(None);
+        };
+        let Some(row) = self.get(&key).await? else {
+            return Ok(None);
+        };
+        Ok(message_from_row(&key, &row)
+            .filter(|m| m.id == id)
+            .map(|m| (key, m)))
+    }
+
+    /// Delete a message that is still stored under `key`, with its index.
+    /// Returns whether it was still there.
+    async fn remove_message(&self, key: &str, m: &Message) -> Result<bool> {
+        if !self.delete_message_row(key, &m.id).await? {
+            return Ok(false);
+        }
+        self.delete(&format!("mid#{}", m.id)).await?;
+        Ok(true)
+    }
+
+    /// Queue a 410 receipt for `m` if it requested one.
+    async fn owe_410(&self, m: &Message) -> Result<Option<(u64, Receipt)>> {
+        let Some(rsub) = &m.rsub else { return Ok(None) };
+        let r = Receipt {
+            rsub: rsub.clone(),
+            msg_id: m.id.clone(),
+            status: 410,
+        };
+        Ok(self.enqueue_receipt(&r).await?.map(|seq| (seq, r)))
+    }
+}
+
+impl Store for BigtableStore {
+    async fn create_user_agent(&self) -> Result<String> {
+        let uaid = new_uaid();
+        self.put(&format!("ua#{uaid}"), D, &[("c", b"1")]).await?;
+        Ok(uaid)
+    }
+
+    async fn user_agent_exists(&self, uaid: &str) -> Result<bool> {
+        self.exists(&format!("ua#{uaid}")).await
+    }
+
+    async fn channel(&self, uaid: &str, channel_id: &str) -> Result<Option<Subscription>> {
+        let Some(row) = self.get(&format!("ch#{uaid}#{channel_id}")).await? else {
+            return Ok(None);
+        };
+        Ok(Some(Subscription {
+            uaid: uaid.to_owned(),
+            channel_id: channel_id.to_owned(),
+            push: text(&row, "push").ok_or("channel row without push")?,
+            vapid: row
+                .get(&b"vapid"[..])
+                .and_then(|v| v.as_slice().try_into().ok()),
+        }))
+    }
+
+    async fn create_subscription(
+        &self,
+        uaid: &str,
+        channel_id: &str,
+        vapid: Option<[u8; 65]>,
+    ) -> Result<Subscription> {
+        let sub = Subscription {
+            uaid: uaid.to_owned(),
+            channel_id: channel_id.to_owned(),
+            push: new_id(),
+            vapid,
+        };
+        let mut cols = vec![("push", sub.push.as_bytes())];
+        if let Some(key) = &sub.vapid {
+            cols.push(("vapid", key));
+        }
+        self.put(&format!("ch#{uaid}#{channel_id}"), D, &cols)
+            .await?;
+        let index: [(&str, &[u8]); 2] = [("uaid", uaid.as_bytes()), ("ch", channel_id.as_bytes())];
+        self.put(&format!("push#{}", sub.push), D, &index).await?;
+        Ok(sub)
+    }
+
+    async fn subscription_by_push(&self, push: &str) -> Result<Option<Subscription>> {
+        let Some(row) = self.get(&format!("push#{push}")).await? else {
+            return Ok(None);
+        };
+        let (Some(uaid), Some(ch)) = (text(&row, "uaid"), text(&row, "ch")) else {
+            return Ok(None);
+        };
+        // The channel row is authoritative; a push row without one is an
+        // orphan left by an interrupted delete.
+        Ok(self.channel(&uaid, &ch).await?.filter(|s| s.push == push))
+    }
+
+    async fn delete_subscription(
+        &self,
+        uaid: &str,
+        channel_id: &str,
+    ) -> Result<Vec<(u64, Receipt)>> {
+        let Some(sub) = self.channel(uaid, channel_id).await? else {
+            return Ok(vec![]);
+        };
+        let mut receipts = Vec::new();
+        for (key, row) in self.read(prefix(format!("msg#{uaid}#"))).await? {
+            let Some(m) = message_from_row(&key, &row) else {
+                continue;
+            };
+            if m.channel_id == channel_id && self.remove_message(&key, &m).await? {
+                receipts.extend(self.owe_410(&m).await?);
+            }
+        }
+        self.delete(&format!("ch#{uaid}#{channel_id}")).await?;
+        self.delete(&format!("push#{}", sub.push)).await?;
+        Ok(receipts)
+    }
+
+    async fn insert_message(&self, m: &Message) -> Result<()> {
+        let key = message_key(m);
+        let ts = m.accepted;
+        let num = |n: u64| n.to_string().into_bytes();
+        // Clear the row first so a replacement never inherits columns, such
+        // as `rsub`, that it does not set itself.
+        let mut mutations = vec![
+            delete_row(),
+            set_cell(M, "id", m.id.as_bytes(), ts),
+            set_cell(M, "ch", m.channel_id.as_bytes(), ts),
+            set_cell(M, "push", m.push.as_bytes(), ts),
+            set_cell(M, "body", m.body.to_vec(), ts),
+            set_cell(M, "ttl", num(m.ttl.into()), ts),
+            set_cell(M, "urgency", m.urgency.as_str(), ts),
+            set_cell(M, "accepted", num(m.accepted), ts),
+            set_cell(M, "expiry", num(m.expiry), ts),
+        ];
+        for (col, value) in [("ctype", &m.ctype), ("cenc", &m.cenc), ("rsub", &m.rsub)] {
+            if let Some(v) = value {
+                mutations.push(set_cell(M, col, v.as_bytes(), ts));
+            }
+        }
+        self.mutate(&key, mutations).await?;
+        self.mutate(
+            &format!("mid#{}", m.id),
+            vec![set_cell(M, "row", key.as_bytes(), ts)],
+        )
+        .await?;
+        if m.rsub.is_some() {
+            let idx = format!("rexp#{:016x}#{}", m.expiry, m.id);
+            self.put(&idx, D, &[("row", key.as_bytes())]).await?;
+        }
+        Ok(())
+    }
+
+    async fn pending(&self, uaid: &str, now: u64) -> Result<Vec<Message>> {
+        let rows = self.read(prefix(format!("msg#{uaid}#"))).await?;
+        let mut out: Vec<Message> = rows
+            .iter()
+            .filter_map(|(key, row)| message_from_row(key, row))
+            .filter(|m| m.expiry > now)
+            .collect();
+        out.sort_by(|a, b| (a.accepted, &a.id).cmp(&(b.accepted, &b.id)));
+        Ok(out)
+    }
+
+    async fn message(&self, id: &str) -> Result<Option<Message>> {
+        Ok(self.locate(id).await?.map(|(_, m)| m))
+    }
+
+    async fn delete_message(
+        &self,
+        id: &str,
+        owner: Option<(&str, &str)>,
+    ) -> Result<Option<Message>> {
+        let Some((key, m)) = self.locate(id).await? else {
+            return Ok(None);
+        };
+        if owner.is_some_and(|(uaid, ch)| m.uaid != uaid || m.channel_id != ch) {
+            return Ok(None);
+        }
+        Ok(self.remove_message(&key, &m).await?.then_some(m))
+    }
+
+    async fn create_receipt_sub(&self) -> Result<String> {
+        let rsub = new_id();
+        self.put(&format!("rsub#{rsub}"), D, &[("c", b"1")]).await?;
+        Ok(rsub)
+    }
+
+    async fn receipt_sub_exists(&self, rsub: &str) -> Result<bool> {
+        self.exists(&format!("rsub#{rsub}")).await
+    }
+
+    async fn delete_receipt_sub(&self, rsub: &str) -> Result<bool> {
+        if !self.receipt_sub_exists(rsub).await? {
+            return Ok(false);
+        }
+        self.delete(&format!("rsub#{rsub}")).await?;
+        for (key, _) in self.read(prefix(format!("rq#{rsub}#"))).await? {
+            self.delete(&key).await?;
+        }
+        Ok(true)
+    }
+
+    async fn enqueue_receipt(&self, r: &Receipt) -> Result<Option<u64>> {
+        if !self.receipt_sub_exists(&r.rsub).await? {
+            return Ok(None);
+        }
+        let seq = next_seq();
+        let key = format!("rq#{}#{seq:016x}", r.rsub);
+        let status = r.status.to_string();
+        let cols: [(&str, &[u8]); 2] =
+            [("msg", r.msg_id.as_bytes()), ("status", status.as_bytes())];
+        self.put(&key, D, &cols).await?;
+        Ok(Some(seq))
+    }
+
+    async fn queued_receipts(&self, rsub: &str) -> Result<Vec<(u64, Receipt)>> {
+        let rows = self.read(prefix(format!("rq#{rsub}#"))).await?;
+        Ok(rows
+            .iter()
+            .filter_map(|(key, row)| {
+                let seq = u64::from_str_radix(key.rsplit('#').next()?, 16).ok()?;
+                let receipt = Receipt {
+                    rsub: rsub.to_owned(),
+                    msg_id: text(row, "msg")?,
+                    status: number(row, "status")?.try_into().ok()?,
+                };
+                Some((seq, receipt))
+            })
+            .collect())
+    }
+
+    async fn delete_receipt(&self, rsub: &str, seq: u64) -> Result<()> {
+        self.delete(&format!("rq#{rsub}#{seq:016x}")).await
+    }
+
+    async fn reap(&self, now: u64) -> Result<Vec<(u64, Receipt)>> {
+        // Messages without receipts are left to Bigtable garbage collection.
+        let due = range("rexp#".to_owned(), format!("rexp#{:016x}", now + 1));
+        let mut receipts = Vec::new();
+        for (idx, row) in self.read(due).await? {
+            let id = idx.rsplit('#').next().unwrap_or_default();
+            if let Some(key) = text(&row, "row")
+                && let Some(mrow) = self.get(&key).await?
+                && let Some(m) = message_from_row(&key, &mrow)
+                && m.id == id
+                && self.remove_message(&key, &m).await?
+            {
+                receipts.extend(self.owe_410(&m).await?);
+            }
+            self.delete(&idx).await?;
+        }
+        Ok(receipts)
+    }
+}

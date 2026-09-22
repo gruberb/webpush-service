@@ -93,7 +93,8 @@ Available when the binary is built with the `fcm` feature (on by default).
 | Key | Default | Meaning |
 |---|---|---|
 | `timeout` | `"10s"` | Per-request timeout |
-| `apps.<app id>.credentials_file` | required | Google service account JSON for the Firebase project |
+| `apps.<app id>.credentials_file` | unset | Google service account JSON for the Firebase project. Unset uses Application Default Credentials (the workload's service account on Cloud Run and GKE) |
+| `apps.<app id>.project_id` | the key's project | Firebase project; required without `credentials_file` |
 | `apps.<app id>.endpoint` | `"https://fcm.googleapis.com"` | FCM base URL |
 
 ## `[bridges.apns]`: Apple Push Notification service
@@ -120,11 +121,13 @@ The default is the in-memory store. To use Bigtable, build with the `bigtable` f
 
 | Key | Default | Meaning |
 |---|---|---|
-| `endpoint` | required | gRPC endpoint, for example `http://127.0.0.1:8086` for the emulator |
+| `endpoint` | required | `https://bigtable.googleapis.com` (TLS and OAuth), or `http://127.0.0.1:8086` for the emulator (neither) |
 | `project` | required | Google Cloud project |
 | `instance` | required | Bigtable instance |
 | `table` | required | Table |
-| `create_table` | `false` | Create the table if it does not exist. For development only |
+| `create_table` | `false` | Create the table and column families if they do not exist. Needs admin rights |
+| `credentials_file` | unset | Service account key. Unset uses Application Default Credentials |
+| `app_profile` | instance default | Bigtable app profile that routes requests |
 
 A cluster cannot use the memory store, because separate processes cannot share it.
 

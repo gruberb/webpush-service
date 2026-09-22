@@ -3,17 +3,18 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/gruberb/webpush-service"
 
 [workspace.dependencies]
-webpush-apns = { path = "crates/webpush-apns", version = "0.2.0" }
-webpush-bridge = { path = "crates/webpush-bridge", version = "0.2.0" }
-webpush-crypto = { path = "crates/webpush-crypto", version = "0.2.0" }
-webpush-fcm = { path = "crates/webpush-fcm", version = "0.2.0" }
-webpush-store = { path = "crates/webpush-store", version = "0.2.0" }
+webpush-apns = { path = "crates/webpush-apns", version = "0.3.0" }
+webpush-bridge = { path = "crates/webpush-bridge", version = "0.3.0" }
+webpush-crypto = { path = "crates/webpush-crypto", version = "0.3.0" }
+webpush-fcm = { path = "crates/webpush-fcm", version = "0.3.0" }
+webpush-gcp-auth = { path = "crates/webpush-gcp-auth", version = "0.3.0" }
+webpush-store = { path = "crates/webpush-store", version = "0.3.0" }
 
 aes-gcm = "0.10"
 axum = { version = "0.8", features = ["ws"] }
@@ -22,7 +23,7 @@ bytes = "1"
 hkdf = "0.12"
 http = "1"
 p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "form", "query"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1", features = ["derive"] }

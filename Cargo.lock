@@ -2389,11 +2389,13 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2744,8 +2746,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "webpush-apns"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2762,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-bridge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
@@ -2772,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-crypto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -2784,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-fcm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2797,11 +2808,27 @@ dependencies = [
  "tokio",
  "tracing",
  "webpush-bridge",
+ "webpush-gcp-auth",
+]
+
+[[package]]
+name = "webpush-gcp-auth"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "reqwest",
+ "ring",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
 name = "webpush-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2842,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "webpush-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2852,6 +2879,7 @@ dependencies = [
  "prost-types",
  "tokio",
  "tonic",
+ "webpush-gcp-auth",
 ]
 
 [[package]]

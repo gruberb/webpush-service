@@ -27,8 +27,21 @@
 //! Index rows are written after, and deleted after, the rows they point at,
 //! so a reader can meet an orphan index row (ignored) but never a half
 //! written one. See `docs/architecture.md` (Storage).
+//!
+//! # Connecting
+//!
+//! | Endpoint | Transport | Authentication |
+//! |---|---|---|
+//! | `http://…` (the emulator) | plaintext | none |
+//! | `https://bigtable.googleapis.com` | TLS (`webpki-roots`) | OAuth 2.0 bearer token per call |
+//!
+//! Tokens come from [`webpush_gcp_auth::TokenSource`]: the configured
+//! service account key, or Application Default Credentials (the metadata
+//! server on Cloud Run and GKE, `gcloud auth application-default login`
+//! locally). Every call also names its table in `x-goog-request-params`,
+//! which Bigtable uses to route it.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use googleapis_tonic_google_bigtable_admin_v2::google::bigtable::admin::v2 as admin;
@@ -36,7 +49,12 @@ use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{
     self as bt, bigtable_client::BigtableClient, read_rows_response::cell_chunk::RowStatus,
     row_filter::Filter, row_range,
 };
-use tonic::{Code, transport::Channel};
+use tonic::{
+    Code,
+    metadata::MetadataValue,
+    transport::{Channel, ClientTlsConfig},
+};
+use webpush_gcp_auth::TokenSource;
 
 use crate::{
     BoxError, BridgeAddress, Message, Receipt, Recipient, Store, Subscription, Urgency, UserAgent,
@@ -52,12 +70,18 @@ type Row = HashMap<Vec<u8>, Vec<u8>>;
 const D: &str = "d";
 /// Column family for messages and the message id index.
 const M: &str = "m";
+/// OAuth scopes for reading and writing rows and for creating the table.
+const SCOPES: [&str; 2] = [
+    "https://www.googleapis.com/auth/bigtable.data",
+    "https://www.googleapis.com/auth/bigtable.admin.table",
+];
 
 /// Where the Bigtable table lives.
 #[derive(Clone, Debug)]
 pub struct BigtableConfig {
-    /// gRPC endpoint, for example `http://127.0.0.1:8086` for the emulator.
-    /// Only plaintext endpoints are supported.
+    /// gRPC endpoint: `https://bigtable.googleapis.com` for Cloud Bigtable,
+    /// or `http://127.0.0.1:8086` for the emulator. `https` endpoints use
+    /// TLS and OAuth; `http` endpoints neither.
     pub endpoint: String,
     /// Google Cloud project that contains the instance.
     pub project: String,
@@ -68,6 +92,11 @@ pub struct BigtableConfig {
     /// The service's maximum TTL in seconds. [`BigtableStore::ensure_table`]
     /// keeps message cells for this long plus one day.
     pub max_ttl: u32,
+    /// Service account key for an `https` endpoint. Without it, Application
+    /// Default Credentials are used.
+    pub credentials_file: Option<PathBuf>,
+    /// App profile that routes the requests; the instance default if unset.
+    pub app_profile: Option<String>,
 }
 
 impl BigtableConfig {
@@ -79,12 +108,58 @@ impl BigtableConfig {
         )
     }
 
-    /// A gRPC channel to the endpoint.
+    /// A gRPC channel to the endpoint. The keepalive notices a dead
+    /// connection before a request waits on it.
     async fn channel(&self) -> Result<Channel> {
-        Ok(Channel::from_shared(self.endpoint.clone())?
-            .connect()
-            .await?)
+        let mut endpoint = Channel::from_shared(self.endpoint.clone())?
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_while_idle(true);
+        if self.endpoint.starts_with("https://") {
+            endpoint = endpoint.tls_config(ClientTlsConfig::new().with_webpki_roots())?;
+        }
+        Ok(endpoint.connect().await?)
     }
+
+    /// Credentials for an `https` endpoint; `None` for the emulator.
+    fn auth(&self) -> Result<Option<Arc<TokenSource>>> {
+        if !self.endpoint.starts_with("https://") {
+            return Ok(None);
+        }
+        let http = webpush_gcp_auth::http_client(Duration::from_secs(10))?;
+        let source = match &self.credentials_file {
+            Some(path) => TokenSource::from_file(path, &SCOPES, http)?,
+            None => TokenSource::discover(&SCOPES, http)?,
+        };
+        Ok(Some(Arc::new(source)))
+    }
+}
+
+/// Wrap `message` in a request with the routing header and, for Cloud
+/// Bigtable, the bearer token. `params` is `field=resource`, as Bigtable
+/// expects in `x-goog-request-params`.
+async fn authorized<T>(
+    message: T,
+    auth: Option<&TokenSource>,
+    params: &str,
+) -> Result<tonic::Request<T>> {
+    let mut req = tonic::Request::new(message);
+    let md = req.metadata_mut();
+    // Resource names hold `/`, which the header value must carry encoded.
+    md.insert(
+        "x-goog-request-params",
+        MetadataValue::try_from(params.replace('/', "%2F"))?,
+    );
+    if let Some(auth) = auth {
+        let token = auth.token().await?;
+        md.insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {token}"))?,
+        );
+        if let Some(project) = auth.quota_project() {
+            md.insert("x-goog-user-project", MetadataValue::try_from(project)?);
+        }
+    }
+    Ok(req)
 }
 
 /// A [`Store`] backed by one Cloud Bigtable table.
@@ -96,6 +171,10 @@ pub struct BigtableStore {
     client: BigtableClient<Channel>,
     /// Fully qualified table name.
     table: String,
+    /// Access tokens, for Cloud Bigtable.
+    auth: Option<Arc<TokenSource>>,
+    /// App profile, or empty for the instance default.
+    app_profile: String,
 }
 
 /// A UTF-8 cell value.
@@ -248,12 +327,21 @@ impl BigtableStore {
     ///
     /// # Errors
     ///
-    /// The endpoint is not a valid URI or does not accept connections.
+    /// The endpoint is not a valid URI or does not accept connections, or
+    /// the credentials cannot be loaded.
     pub async fn connect(cfg: &BigtableConfig) -> Result<Self> {
         Ok(BigtableStore {
             client: BigtableClient::new(cfg.channel().await?),
             table: cfg.table_name(),
+            auth: cfg.auth()?,
+            app_profile: cfg.app_profile.clone().unwrap_or_default(),
         })
+    }
+
+    /// Wrap a data API message for this table.
+    async fn request<T>(&self, message: T) -> Result<tonic::Request<T>> {
+        let params = format!("table_name={}", self.table);
+        authorized(message, self.auth.as_deref(), &params).await
     }
 
     /// Create the table and its column families if they do not exist.
@@ -268,11 +356,16 @@ impl BigtableStore {
         use admin::{GcRule, gc_rule::Rule};
         let mut client =
             admin::bigtable_table_admin_client::BigtableTableAdminClient::new(cfg.channel().await?);
+        let auth = cfg.auth()?;
         let get = admin::GetTableRequest {
             name: cfg.table_name(),
             ..Default::default()
         };
-        match client.get_table(get).await {
+        let params = format!("name={}", cfg.table_name());
+        match client
+            .get_table(authorized(get, auth.as_deref(), &params).await?)
+            .await
+        {
             Ok(_) => return Ok(()),
             Err(s) if s.code() == Code::NotFound => {}
             Err(s) => return Err(s.into()),
@@ -303,8 +396,10 @@ impl BigtableStore {
                 }),
             ),
         ]);
+        let parent = format!("projects/{}/instances/{}", cfg.project, cfg.instance);
+        let params = format!("parent={parent}");
         let create = admin::CreateTableRequest {
-            parent: format!("projects/{}/instances/{}", cfg.project, cfg.instance),
+            parent,
             table_id: cfg.table.clone(),
             table: Some(admin::Table {
                 column_families: families,
@@ -312,7 +407,10 @@ impl BigtableStore {
             }),
             ..Default::default()
         };
-        match client.create_table(create).await {
+        match client
+            .create_table(authorized(create, auth.as_deref(), &params).await?)
+            .await
+        {
             Err(s) if s.code() != Code::AlreadyExists => Err(s.into()),
             _ => Ok(()),
         }
@@ -324,11 +422,15 @@ impl BigtableStore {
     async fn mutate(&self, key: &str, mutations: Vec<bt::Mutation>) -> Result<()> {
         let req = bt::MutateRowRequest {
             table_name: self.table.clone(),
+            app_profile_id: self.app_profile.clone(),
             row_key: key.as_bytes().to_vec(),
             mutations,
             ..Default::default()
         };
-        self.client.clone().mutate_row(req).await?;
+        self.client
+            .clone()
+            .mutate_row(self.request(req).await?)
+            .await?;
         Ok(())
     }
 
@@ -348,11 +450,17 @@ impl BigtableStore {
     async fn read(&self, rows: bt::RowSet) -> Result<Vec<(String, Row)>> {
         let req = bt::ReadRowsRequest {
             table_name: self.table.clone(),
+            app_profile_id: self.app_profile.clone(),
             rows: Some(rows),
             filter: Some(filter(Filter::CellsPerColumnLimitFilter(1))),
             ..Default::default()
         };
-        let mut stream = self.client.clone().read_rows(req).await?.into_inner();
+        let mut stream = self
+            .client
+            .clone()
+            .read_rows(self.request(req).await?)
+            .await?
+            .into_inner();
         let mut out = Vec::new();
         // Row key and qualifier are reused from earlier chunks when omitted,
         // and a value split over several chunks is concatenated until a chunk
@@ -409,12 +517,17 @@ impl BigtableStore {
     ) -> Result<bool> {
         let req = bt::CheckAndMutateRowRequest {
             table_name: self.table.clone(),
+            app_profile_id: self.app_profile.clone(),
             row_key: key.as_bytes().to_vec(),
             predicate_filter: Some(predicate),
             true_mutations: mutations,
             ..Default::default()
         };
-        let resp = self.client.clone().check_and_mutate_row(req).await?;
+        let resp = self
+            .client
+            .clone()
+            .check_and_mutate_row(self.request(req).await?)
+            .await?;
         Ok(resp.into_inner().predicate_matched)
     }
 

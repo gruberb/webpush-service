@@ -32,6 +32,8 @@ async fn main() -> Result<(), BoxError> {
                 instance: bt.instance,
                 table: bt.table,
                 max_ttl: u32::try_from(cfg.push.max_ttl.as_secs()).unwrap_or(u32::MAX),
+                credentials_file: bt.credentials_file,
+                app_profile: bt.app_profile,
             };
             if matches!(&cfg.store, config::Store::Bigtable(b) if b.create_table) {
                 BigtableStore::ensure_table(&bt).await?;

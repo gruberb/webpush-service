@@ -1,0 +1,8 @@
+target
+.git
+.claude
+*.html
+*.pem
+*.p8
+*.json
+deploy

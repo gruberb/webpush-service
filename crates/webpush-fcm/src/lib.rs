@@ -7,13 +7,19 @@
 //!
 //! # Authentication
 //!
-//! FCM v1 takes an OAuth 2.0 access token. The bridge signs a JWT with the
-//! service account's RSA key (RS256, scope
-//! `https://www.googleapis.com/auth/firebase.messaging`, audience
-//! `token_uri`), exchanges it at `token_uri` using the `jwt-bearer` grant,
-//! and caches the resulting token per application until less than a minute
-//! of its lifetime remains. Concurrent sends wait for a single refresh
-//! instead of each requesting a token.
+//! FCM v1 takes an OAuth 2.0 access token with the scope
+//! `https://www.googleapis.com/auth/firebase.messaging`, obtained through
+//! [`webpush_gcp_auth::TokenSource`]:
+//!
+//! - With `credentials_file`, from that service account key: an RS256 JWT
+//!   exchanged at the key's `token_uri`.
+//! - Without it, from Application Default Credentials: on Cloud Run or GKE
+//!   the workload's own service account through the metadata server, so no
+//!   key file is deployed; locally `gcloud auth application-default login`.
+//!   `project_id` is then required.
+//!
+//! Tokens are cached per application until less than a minute of their
+//! lifetime remains, and concurrent sends wait for a single refresh.
 //!
 //! # Payload
 //!
@@ -47,39 +53,29 @@
 //! ```toml
 //! [bridges.fcm.apps.example-android]
 //! credentials_file = "/etc/webpush/fcm-example.json"
+//!
+//! # Or, with Application Default Credentials:
+//! [bridges.fcm.apps.example-android-adc]
+//! project_id = "example-firebase-project"
 //! ```
 //!
 //! `endpoint` overrides the FCM base URL (default
 //! `https://fcm.googleapis.com`) and `timeout` the per-request timeout
 //! (default `10s`).
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{StatusCode, header};
-use ring::{
-    rand::SystemRandom,
-    signature::{RSA_PKCS1_SHA256, RsaKeyPair},
-};
-use rustls_pki_types::{PrivatePkcs8KeyDer, pem::PemObject};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Mutex;
 use webpush_bridge::{Address, BoxError, BoxFuture, Bridge, Error, Notification, Priority};
+use webpush_gcp_auth::TokenSource;
 
 const DEFAULT_ENDPOINT: &str = "https://fcm.googleapis.com";
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const MAX_DATA_BYTES: usize = 4096;
 /// 28 days, the longest TTL FCM accepts.
 const MAX_TTL_SECS: u64 = 2_419_200;
-/// Lifetime requested for the signed assertion; Google caps it at one hour.
-const ASSERTION_LIFETIME_SECS: u64 = 3600;
-/// Refresh this long before expiry so a token never lapses mid-request.
-const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
 /// Bridge configuration.
 #[derive(Clone, Debug, Deserialize)]
@@ -101,33 +97,27 @@ fn default_timeout() -> Duration {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
-    /// Path to the Google service account JSON key.
-    pub credentials_file: PathBuf,
+    /// Path to a Google service account JSON key. Without it the bridge uses
+    /// Application Default Credentials.
+    #[serde(default)]
+    pub credentials_file: Option<PathBuf>,
+    /// The Firebase project. Defaults to the service account key's project;
+    /// required without `credentials_file`.
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// FCM base URL, `https://fcm.googleapis.com` if unset.
     #[serde(default)]
     pub endpoint: Option<String>,
 }
 
-/// The fields of a service account key the bridge needs.
-#[derive(Deserialize)]
-struct ServiceAccount {
-    project_id: String,
-    client_email: String,
-    private_key: String,
-    token_uri: String,
-}
-
+/// One application's credentials and send URL.
 struct App {
-    client_email: String,
-    token_uri: String,
-    key: RsaKeyPair,
+    /// Access tokens for the application's project.
+    auth: TokenSource,
+    /// `.../v1/projects/{project}/messages:send`.
     send_url: String,
-    token: Mutex<Option<AccessToken>>,
-}
-
-struct AccessToken {
-    value: String,
-    expires_at: Instant,
+    /// Project billed for user credentials, sent as `x-goog-user-project`.
+    quota_project: Option<String>,
 }
 
 /// The FCM bridge. Holds credentials, cached access tokens, and an HTTP
@@ -135,7 +125,6 @@ struct AccessToken {
 pub struct Fcm {
     apps: HashMap<String, App>,
     http: reqwest::Client,
-    rng: SystemRandom,
 }
 
 impl Fcm {
@@ -143,97 +132,21 @@ impl Fcm {
     ///
     /// # Errors
     ///
-    /// A credentials file cannot be read, is not a service account key, or
-    /// holds a private key that is not PKCS#8 RSA; or the HTTP client
-    /// cannot be built. Checking at startup keeps a bad deployment from
+    /// A credentials file cannot be read or used, an application has no
+    /// project, or the HTTP client cannot be built. Checking at startup keeps a bad deployment from
     /// surfacing only on the first message.
     pub fn new(cfg: &Config) -> Result<Self, BoxError> {
+        let http = webpush_bridge::http_client(cfg.timeout)?;
         let apps = cfg
             .apps
             .iter()
             .map(|(id, app)| {
-                load_app(app)
+                load_app(app, &http)
                     .map(|a| (id.clone(), a))
-                    .map_err(|e| format!("fcm app {id} ({}): {e}", app.credentials_file.display()))
+                    .map_err(|e| format!("fcm app {id}: {e}"))
             })
             .collect::<Result<_, _>>()?;
-        Ok(Self {
-            apps,
-            http: webpush_bridge::http_client(cfg.timeout)?,
-            rng: SystemRandom::new(),
-        })
-    }
-
-    /// A valid access token for `app`, fetching one if the cache is empty or
-    /// about to expire. Holding the lock across the fetch makes concurrent
-    /// callers share one refresh.
-    async fn access_token(&self, app: &App) -> Result<String, Error> {
-        let mut cached = app.token.lock().await;
-        if let Some(t) = cached.as_ref()
-            && t.expires_at.saturating_duration_since(Instant::now()) > REFRESH_MARGIN
-        {
-            return Ok(t.value.clone());
-        }
-        let fresh = self.fetch_token(app).await.map_err(Error::Unavailable)?;
-        let value = fresh.value.clone();
-        *cached = Some(fresh);
-        Ok(value)
-    }
-
-    async fn fetch_token(&self, app: &App) -> Result<AccessToken, BoxError> {
-        #[derive(Deserialize)]
-        struct TokenResponse {
-            access_token: String,
-            expires_in: u64,
-        }
-
-        let assertion = self.assertion(app)?;
-        let requested = Instant::now();
-        let resp = self
-            .http
-            .post(&app.token_uri)
-            .form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-                ("assertion", &assertion),
-            ])
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            // The body may echo the assertion; keep it out of errors and logs.
-            return Err(format!("token endpoint returned {status}").into());
-        }
-        let token: TokenResponse = resp.json().await?;
-        Ok(AccessToken {
-            value: token.access_token,
-            // Measured from before the request, so network delay only makes
-            // the cached lifetime shorter, never longer.
-            expires_at: requested + Duration::from_secs(token.expires_in),
-        })
-    }
-
-    /// The signed JWT the token endpoint exchanges for an access token.
-    fn assertion(&self, app: &App) -> Result<String, BoxError> {
-        let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
-        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
-            "iss": app.client_email,
-            "scope": SCOPE,
-            "aud": app.token_uri,
-            "iat": iat,
-            "exp": iat + ASSERTION_LIFETIME_SECS,
-        }))?);
-        let signing_input = format!("{header}.{claims}");
-        let mut sig = vec![0; app.key.public().modulus_len()];
-        app.key
-            .sign(
-                &RSA_PKCS1_SHA256,
-                &self.rng,
-                signing_input.as_bytes(),
-                &mut sig,
-            )
-            .map_err(|_| "RSA signing failed")?;
-        Ok(format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig)))
+        Ok(Self { apps, http })
     }
 
     async fn deliver(&self, to: Address<'_>, n: &Notification<'_>) -> Result<(), Error> {
@@ -254,22 +167,22 @@ impl Fcm {
             },
         }});
 
-        let token = self.access_token(app).await?;
-        let resp = self
-            .http
-            .post(&app.send_url)
-            .bearer_auth(token)
-            .json(&body)
+        let token = app.auth.token().await.map_err(Error::Unavailable)?;
+        let mut request = self.http.post(&app.send_url).bearer_auth(token).json(&body);
+        if let Some(project) = &app.quota_project {
+            request = request.header("x-goog-user-project", project);
+        }
+        let resp = request
             .send()
             .await
-            .map_err(|e| Error::Unavailable(e.into()))?;
+            .map_err(|e| Error::Unavailable(e.without_url().into()))?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
         }
         if status == StatusCode::UNAUTHORIZED {
             // The token was revoked or the clock drifted; start over next time.
-            *app.token.lock().await = None;
+            app.auth.invalidate().await;
         }
         let retry_after = resp
             .headers()
@@ -301,22 +214,24 @@ impl Bridge for Fcm {
     }
 }
 
-fn load_app(cfg: &AppConfig) -> Result<App, BoxError> {
-    let sa: ServiceAccount = serde_json::from_slice(&std::fs::read(&cfg.credentials_file)?)?;
-    let der = PrivatePkcs8KeyDer::from_pem_slice(sa.private_key.as_bytes())?;
-    let key = RsaKeyPair::from_pkcs8(der.secret_pkcs8_der())
-        .map_err(|e| format!("private_key is not a usable RSA key: {e}"))?;
+fn load_app(cfg: &AppConfig, http: &reqwest::Client) -> Result<App, BoxError> {
+    let auth = match &cfg.credentials_file {
+        Some(path) => TokenSource::from_file(path, &[SCOPE], http.clone())?,
+        None => TokenSource::discover(&[SCOPE], http.clone())?,
+    };
+    let project = cfg
+        .project_id
+        .as_deref()
+        .or(auth.project_id())
+        .ok_or("project_id is required without a service account key")?;
     let endpoint = cfg.endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
     Ok(App {
-        client_email: sa.client_email,
-        token_uri: sa.token_uri,
-        key,
         send_url: format!(
-            "{}/v1/projects/{}/messages:send",
-            endpoint.trim_end_matches('/'),
-            sa.project_id
+            "{}/v1/projects/{project}/messages:send",
+            endpoint.trim_end_matches('/')
         ),
-        token: Mutex::new(None),
+        quota_project: auth.quota_project().map(str::to_owned),
+        auth,
     })
 }
 

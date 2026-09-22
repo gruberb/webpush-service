@@ -115,15 +115,22 @@ Firefox reconnects after a 1001 close, so a rolling restart loses no messages: u
 
 ## Running on Bigtable
 
-The Bigtable adapter keeps state across restarts and lets several nodes share it. It currently supports the emulator only; production Bigtable needs TLS and Google Cloud authentication on the gRPC channel, which is not implemented yet.
+The Bigtable adapter keeps state across restarts and lets several nodes share it. The binary includes it when built with the `bigtable` feature. The endpoint's scheme decides how it connects:
 
-The binary includes the adapter when built with the `bigtable` feature. To start the emulator on port 8086, run this in its own terminal:
+| Endpoint | Transport | Authentication |
+|---|---|---|
+| `http://127.0.0.1:8086` (emulator) | plaintext | none |
+| `https://bigtable.googleapis.com` | TLS | OAuth 2.0 token on every call |
+
+### Against the emulator
+
+To start the emulator on port 8086, run this in its own terminal:
 
 ```bash
 gcloud beta emulators bigtable start --host-port=127.0.0.1:8086
 ```
 
-Then add the store to `webpush.toml`. `create_table` creates the table and its column families if they do not exist, which is convenient against the emulator; provision production tables ahead of time instead:
+Then add the store to `webpush.toml`. `create_table` creates the table and its column families if they do not exist, which is convenient against the emulator; keep it off for production tables provisioned ahead of time:
 
 ```toml
 [store.bigtable]
@@ -140,7 +147,42 @@ Start the service with the feature enabled:
 cargo run --release -p webpush-server --features bigtable -- --config webpush.toml
 ```
 
+### Against Cloud Bigtable
+
+Point the endpoint at Google and name your instance and table:
+
+```toml
+[store.bigtable]
+endpoint = "https://bigtable.googleapis.com"
+project = "your-project"
+instance = "your-instance"
+table = "push"
+create_table = true
+```
+
+Tokens come from `credentials_file`, a service account key, when set. Otherwise the service uses Application Default Credentials: on Cloud Run and GKE the workload's service account through the metadata server, so no key file is deployed; on a workstation the credentials from `gcloud auth application-default login`. The account needs `roles/bigtable.user`, and `roles/bigtable.admin` as well while `create_table` is on.
+
+To check a table and your credentials before deploying, run the store contract against it. It writes its own rows and leaves existing data alone:
+
+```bash
+BIGTABLE_LIVE=your-project/your-instance/push \
+  cargo test -p webpush-store --features bigtable --test contract -- --ignored
+```
+
 The message column family's maximum age is `push.max_ttl` plus one day, so Bigtable discards expired messages on its own. [Architecture](architecture.md#bigtable-layout) describes the layout.
+
+## Running in a container
+
+The repository's `Dockerfile` builds the binary with both bridges and the Bigtable adapter into a distroless image that runs as a non-root user:
+
+```bash
+docker build -t webpush-server .
+docker run -p 8443:8443 -p 8081:8081 \
+  -v "$PWD/webpush.toml:/etc/webpush/webpush.toml:ro" \
+  -e WEBPUSH_CONFIG=/etc/webpush/webpush.toml webpush-server
+```
+
+Without a mounted file, `WEBPUSH_*` environment variables alone configure the service. Platforms such as Cloud Run expect the listener on `$PORT`; set `WEBPUSH_PUBLIC__LISTEN=0.0.0.0:8080` accordingly and leave `[public.tls]` unset, since the platform terminates TLS.
 
 ## Running the tests
 

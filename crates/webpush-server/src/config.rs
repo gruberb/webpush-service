@@ -357,7 +357,8 @@ pub enum Store {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bigtable {
-    /// gRPC endpoint, for example `http://127.0.0.1:8086` for the emulator.
+    /// gRPC endpoint: `https://bigtable.googleapis.com`, or
+    /// `http://127.0.0.1:8086` for the emulator.
     pub endpoint: String,
     /// Google Cloud project.
     pub project: String,
@@ -365,9 +366,17 @@ pub struct Bigtable {
     pub instance: String,
     /// Table.
     pub table: String,
-    /// Create the table if it does not exist. For development only.
+    /// Create the table if it does not exist.
     #[serde(default)]
     pub create_table: bool,
+    /// Service account key. Without it, Cloud Bigtable is reached with
+    /// Application Default Credentials: the workload's service account on
+    /// Cloud Run and GKE, `gcloud auth application-default login` locally.
+    #[serde(default)]
+    pub credentials_file: Option<PathBuf>,
+    /// App profile that routes the requests; the instance default if unset.
+    #[serde(default)]
+    pub app_profile: Option<String>,
 }
 
 /// Log output.

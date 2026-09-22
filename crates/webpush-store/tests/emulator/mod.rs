@@ -49,6 +49,8 @@ pub async fn start(max_ttl: u32) -> (Emulator, BigtableStore) {
         instance: "test".to_owned(),
         table: "push".to_owned(),
         max_ttl,
+        credentials_file: None,
+        app_profile: None,
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

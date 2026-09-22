@@ -1,0 +1,9 @@
+# gcloud builds submit uses this; keep in sync with .dockerignore.
+target
+.git
+.claude
+*.html
+*.pem
+*.p8
+*.json
+deploy

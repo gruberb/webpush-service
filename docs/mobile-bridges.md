@@ -96,11 +96,18 @@ Configure each platform under `[bridges]`, keyed by the app id apps register wit
 
 ### FCM
 
-FCM's HTTP v1 API takes OAuth 2.0 access tokens. The bridge signs a JWT with the service account's RSA key, exchanges it at Google's token endpoint, and caches the access token until shortly before it expires. Download a service account key for the Firebase project and point the app at it:
+FCM's HTTP v1 API takes OAuth 2.0 access tokens, cached until shortly before they expire. With a service account key, the bridge signs a JWT with its RSA key and exchanges it at Google's token endpoint:
 
 ```toml
 [bridges.fcm.apps.example-android]
 credentials_file = "/etc/webpush/fcm-example.json"
+```
+
+On Cloud Run or GKE, leave the key out and name the project; the bridge then uses the workload's service account through the metadata server, which needs the Firebase Cloud Messaging API enabled and `roles/firebasecloudmessaging.admin`:
+
+```toml
+[bridges.fcm.apps.example-android]
+project_id = "your-firebase-project"
 ```
 
 Messages go out as data messages, so the app decides what to show. The TTL is capped at FCM's maximum of 28 days, and urgency `high` maps to high priority.

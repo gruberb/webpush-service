@@ -135,7 +135,8 @@ fn config(credentials_file: PathBuf, endpoint: Option<String>) -> Config {
         apps: HashMap::from([(
             "example-android".to_owned(),
             AppConfig {
-                credentials_file,
+                credentials_file: Some(credentials_file),
+                project_id: None,
                 endpoint,
             },
         )]),

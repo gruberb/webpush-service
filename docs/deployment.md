@@ -9,7 +9,7 @@ This guide runs the push service in production: as one process, or as a cluster 
 | Single node | one `all` process | memory or Bigtable | Development, small deployments, one machine is enough |
 | Cluster | `endpoint` replicas and `connect` nodes | Bigtable, or another shared adapter | Sessions or push traffic outgrow one machine, or you need rolling restarts without a single point of failure |
 
-The memory store keeps state in one process, so a cluster needs a shared store. The Bigtable adapter supports the emulator only for now; see [Running on Bigtable](running.md#running-on-bigtable).
+The memory store keeps state in one process, so a cluster needs a shared store. Use the Bigtable adapter; see [Running on Bigtable](running.md#running-on-bigtable). The repository's `Dockerfile` builds an image with every feature; see [Running in a container](running.md#running-in-a-container).
 
 ## Cluster layout
 

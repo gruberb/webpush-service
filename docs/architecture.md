@@ -197,7 +197,7 @@ All state goes through the `Store` trait in `webpush-store`. It is written in te
 | Adapter | Feature | Use |
 |---|---|---|
 | `MemoryStore` | default | Development, tests, and single-node deployments that can lose undelivered messages on restart. Clones share state |
-| `BigtableStore` | `bigtable` | Cloud Bigtable over gRPC. Currently the emulator only: production endpoints need TLS and Google authentication on the channel |
+| `BigtableStore` | `bigtable` | Cloud Bigtable over gRPC: TLS and OAuth tokens (from `webpush-gcp-auth`) for `https` endpoints, plaintext for the emulator |
 
 ### Bigtable layout
 

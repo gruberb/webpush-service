@@ -1,0 +1,25 @@
+[package]
+name = "webpush-gcp-auth"
+description = "Google Cloud access tokens from service account keys, user credentials, or the metadata server"
+keywords = ["gcp", "oauth2", "google", "auth"]
+categories = ["authentication"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+ring.workspace = true
+rustls-pki-types = { version = "1", features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+
+[lints]
+workspace = true

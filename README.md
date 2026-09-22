@@ -27,8 +27,9 @@ flowchart LR
 | [`webpush-fcm`](crates/webpush-fcm) | FCM HTTP v1 bridge, with OAuth 2.0 service account tokens |
 | [`webpush-apns`](crates/webpush-apns) | APNs bridge, with ES256 provider tokens |
 | [`webpush-crypto`](crates/webpush-crypto) | RFC 8188 and RFC 8291 message encryption and RFC 8292 VAPID verification, with no I/O |
+| [`webpush-gcp-auth`](crates/webpush-gcp-auth) | Google Cloud access tokens from service account keys, gcloud user credentials, or the metadata server; used by Bigtable and FCM |
 
-Dependencies point one way: `webpush-server` depends on the other crates, and the bridge crates depend only on `webpush-bridge`. A new storage adapter depends only on `webpush-store`.
+Dependencies point one way: `webpush-server` depends on the other crates, and the bridge crates depend only on `webpush-bridge` (and FCM on `webpush-gcp-auth`). A new storage adapter depends only on `webpush-store`.
 
 ## Specifications
 
@@ -72,6 +73,8 @@ EOF
 cargo run --release -p webpush-server -- --config webpush.toml
 ```
 
+A `Dockerfile` builds a distroless image with both bridges and the Bigtable adapter; see [Running in a container](docs/running.md#running-in-a-container).
+
 To use it from Firefox, trust `cert.pem` in Firefox, set `dom.push.serverURL` to `wss://localhost:8443/` in `about:config`, and restart Firefox.
 
 [`config/webpush.example.toml`](config/webpush.example.toml) lists every setting with its default. Any setting can also come from a `WEBPUSH_*` environment variable, for example `WEBPUSH_CLUSTER__TOKEN`.
@@ -95,7 +98,7 @@ The service takes any implementation of the `webpush_store::Store` trait:
 | Adapter | Status |
 |---|---|
 | `MemoryStore` | Default. Complete. State is lost on restart, and nodes cannot share it, so it suits `role = "all"` only |
-| `BigtableStore` | `--features bigtable`. Passes the contract and the full conformance suite against the Bigtable emulator. It connects over plaintext gRPC without Google authentication, so it cannot reach Cloud Bigtable yet |
+| `BigtableStore` | `--features bigtable`. Cloud Bigtable over TLS with OAuth tokens from a service account key or Application Default Credentials; the emulator over plaintext. Passes the contract and the full conformance suite against the emulator, and ships an opt-in contract test for a live table |
 | Your own | Implement `Store`, then prove it with `webpush_store::contract::check`. See [Storage adapters](docs/storage-adapters.md) |
 
 ## Mobile applications
@@ -143,6 +146,5 @@ The Bigtable tests need the gcloud Bigtable emulator (`gcloud components install
 
 Complete for the application server side of RFC 8030 and RFC 8292, for Firefox's browser protocol, and for FCM and APNs delivery, on one node or split into endpoint and connect services. Not yet available:
 
-- A production storage adapter. The Bigtable adapter lacks TLS and Google authentication on its gRPC channel.
 - Rate limiting of application servers.
 - Broadcasts, which the WebSocket protocol defines but Web Push does not use.

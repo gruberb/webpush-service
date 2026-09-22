@@ -15,7 +15,8 @@ getrandom = "0.3"
 googleapis-tonic-google-bigtable-admin-v2 = { version = "0.45", optional = true }
 googleapis-tonic-google-bigtable-v2 = { version = "0.39", optional = true }
 prost-types = { version = "0.14", optional = true }
-tonic = { version = "0.14", features = ["transport"], optional = true }
+tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roots"], optional = true }
+webpush-gcp-auth = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
@@ -25,6 +26,7 @@ default = []
 # Cloud Bigtable adapter (`BigtableStore`).
 bigtable = [
     "dep:tonic",
+    "dep:webpush-gcp-auth",
     "dep:prost-types",
     "dep:googleapis-tonic-google-bigtable-v2",
     "dep:googleapis-tonic-google-bigtable-admin-v2",
